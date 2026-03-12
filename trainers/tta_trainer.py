@@ -36,6 +36,14 @@ class TTATrainer(TTAAbstractTrainer):
     def __init__(self, args):
         super(TTATrainer, self).__init__(args)
         self.seed = getattr(args, "seed", 42)
+        if getattr(args, 'seeds', None):
+            self._seeds_list = [int(s.strip()) for s in str(args.seeds).split(',') if s.strip()]
+        else:
+            self._seeds_list = None
+        if self._seeds_list:
+            self.num_runs = max(int(self.num_runs), len(self._seeds_list))
+            self.seed = int(self._seeds_list[0])
+        self._current_run_seed = self.seed
         fix_randomness(self.seed)
         self.pretrain_cache_dir = getattr(args, "pretrain_cache_dir", None)
         if self.pretrain_cache_dir:
@@ -88,7 +96,13 @@ class TTATrainer(TTAAbstractTrainer):
 
             for run_id in range(self.num_runs):
                 self.run_id = run_id
-                fix_randomness(self.seed)
+                if self._seeds_list and len(self._seeds_list) >= self.num_runs:
+                    current_seed = self._seeds_list[run_id]
+                else:
+                    current_seed = self.seed + run_id
+                fix_randomness(current_seed)
+                self._current_run_seed = current_seed
+                print(f"[Seed] run_id={run_id}, seed={current_seed}")
                 print(run_id)
                 self.logger, self.scenario_log_dir = starting_logs(
                     self.dataset, self.da_method, self.exp_log_dir, src_id, trg_id, run_id
@@ -103,7 +117,7 @@ class TTATrainer(TTAAbstractTrainer):
                 if self.da_method == "NoAdap":
                     self.load_data(src_id, trg_id)
                 else:
-                    self.load_data_demo(src_id, trg_id, self.seed)
+                    self.load_data_demo(src_id, trg_id, current_seed)
 
                 print('Total test datasize:', len(self.trg_whole_dl.dataset))
                 all_labels = torch.zeros(self.dataset_configs.num_classes)
@@ -142,14 +156,21 @@ class TTATrainer(TTAAbstractTrainer):
                 metrics = self.calculate_metrics(tta_model)
                 cur_scenario_metrics.append(metrics)
                 cur_scenario_f1_ret.append(metrics[1])
-                table_results = self.append_results_to_tables(table_results, scenario, run_id, metrics[:3], seed=self.seed)
-                table_risks = self.append_results_to_tables(table_risks, scenario, run_id, metrics[-1], seed=self.seed)
+                table_results = self.append_results_to_tables(
+                    table_results, scenario, run_id, metrics[:3], seed=current_seed
+                )
+                table_risks = self.append_results_to_tables(
+                    table_risks, scenario, run_id, metrics[-1], seed=current_seed
+                )
 
                 # 输出/保存选样统计（若算法有记录）
                 sel_cnt = getattr(tta_model, "_selected_counter", None)
                 total_cnt = getattr(tta_model, "_total_samples", None)
                 if sel_cnt is not None and total_cnt is not None:
-                    stat_line = f"[SelStats] scenario={scenario} seed={self.seed} selected={sel_cnt}/{total_cnt} ({100.0*sel_cnt/total_cnt:.2f}%)"
+                    stat_line = (
+                        f"[SelStats] scenario={scenario} seed={current_seed} "
+                        f"selected={sel_cnt}/{total_cnt} ({100.0*sel_cnt/total_cnt:.2f}%)"
+                    )
                     print(stat_line)
                     try:
                         with open(os.path.join(self.scenario_log_dir, "selected_stats.txt"), "a") as f:
@@ -335,11 +356,8 @@ if __name__ == "__main__":
     else:
         seed_list = [getattr(args, 'seed', 42)]
 
-    base_exp_name = args.exp_name
-    multiple = len(seed_list) > 1
-    for seed in seed_list:
-        seed_args = argparse.Namespace(**vars(args))
-        seed_args.seed = seed
-        if multiple:
-            seed_args.exp_name = f"{base_exp_name}_seed{seed}"
-        _run_single(seed_args)
+    if seed_list:
+        args.seed = seed_list[0]
+        args.seeds = ",".join(str(seed) for seed in seed_list)
+        args.num_runs = max(int(args.num_runs), len(seed_list))
+    _run_single(args)

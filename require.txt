@@ -4,6 +4,7 @@ torchaudio==2.5.1
 torchmetrics
 numpy
 pandas
+matplotlib
 scikit-learn
 scipy
 einops

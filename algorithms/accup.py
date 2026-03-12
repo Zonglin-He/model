@@ -1,10 +1,83 @@
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.interpolate import CubicSpline
 
 from algorithms.base_tta_algorithm import BaseTestTimeAlgorithm
 from utils.utils import EATAMemory, softmax_entropy_from_logits
+
+
+class NuSTAR_ActiveSearch:
+    """Piecewise amplitude search with natural cubic spline upsampling."""
+
+    def __init__(self, num_control_points=10, num_candidates=4, sigma=0.1):
+        self.num_control_points = int(num_control_points)
+        self.num_candidates = int(num_candidates)
+        self.sigma = float(sigma)
+        self.last_warp_curve = None
+        self.last_warp_curves = None
+
+    def _sample_control_points(self, batch_size, device, dtype):
+        base = torch.ones(
+            batch_size,
+            self.num_candidates,
+            self.num_control_points,
+            device=device,
+            dtype=dtype,
+        )
+        if self.sigma <= 0.0 or self.num_candidates <= 0:
+            return base
+        noise = torch.randn_like(base) * self.sigma + 1.0
+        return noise.clamp(1.0 - self.sigma, 1.0 + self.sigma)
+
+    @staticmethod
+    def _natural_cubic_spline_upsample(k, target_len):
+        if k.dim() != 2:
+            raise ValueError(f"Expected control tensor with shape [N_cand, M], got {tuple(k.shape)}")
+        num_candidates, num_ctrl = k.shape
+        if target_len <= 0:
+            raise ValueError("target_len must be positive")
+        if num_ctrl == 1:
+            return k.repeat(1, target_len)
+
+        device = k.device
+        dtype = k.dtype
+        ctrl_x = np.linspace(0, target_len - 1, num_ctrl, dtype=np.float64)
+        eval_x = np.linspace(0, target_len - 1, target_len, dtype=np.float64)
+        k_np = k.detach().cpu().numpy().astype(np.float64, copy=False)
+        curves = []
+        for cand_idx in range(num_candidates):
+            spline = CubicSpline(ctrl_x, k_np[cand_idx], bc_type="natural")
+            curves.append(spline(eval_x))
+        curves_np = np.stack(curves, axis=0)
+        return torch.from_numpy(curves_np).to(device=device, dtype=dtype)
+
+    def __call__(self, x, model):
+        batch_size, channels, target_len = x.shape
+        if self.num_candidates <= 0 or self.sigma <= 0.0:
+            best_w = torch.ones(batch_size, 1, target_len, device=x.device, dtype=x.dtype)
+            self.last_warp_curves = best_w.detach().cpu()
+            self.last_warp_curve = best_w[:1].detach().cpu()
+            return x
+
+        controls = self._sample_control_points(batch_size, x.device, x.dtype)
+        flat_controls = controls.reshape(batch_size * self.num_candidates, self.num_control_points)
+        upsampled = self._natural_cubic_spline_upsample(flat_controls, target_len)
+        warps = upsampled.reshape(batch_size, self.num_candidates, target_len)
+        warped_x = x.unsqueeze(1) * warps.unsqueeze(2)
+        flat_x = warped_x.reshape(batch_size * self.num_candidates, channels, target_len)
+
+        with torch.no_grad():
+            feats, _ = model.feature_extractor(flat_x)
+            logits = model.classifier(feats)
+            ent = softmax_entropy_from_logits(logits).reshape(batch_size, self.num_candidates)
+        best_idx = ent.argmax(dim=1)
+        best_w = warps[torch.arange(batch_size, device=x.device), best_idx].unsqueeze(1)
+        self.last_warp_curves = best_w.detach().cpu()
+        self.last_warp_curve = best_w[:1].detach().cpu()
+        return x * best_w
 
 
 class ACCUP(BaseTestTimeAlgorithm):
@@ -17,12 +90,20 @@ class ACCUP(BaseTestTimeAlgorithm):
 
         self.num_classes = configs.num_classes
         self.adv_sigmas = self._parse_sigmas(hparams.get("adv_sigmas", [0.0]))
+        self.adv_sigma = float(hparams.get("adv_sigma", max([abs(s) for s in self.adv_sigmas], default=0.0)))
+        self.adv_num_candidates = int(hparams.get("adv_num_candidates", 4 if self.adv_sigma > 0.0 else 0))
+        self.num_control_points = int(hparams.get("num_control_points", 10))
         self.sem_thresh = float(hparams.get("sem_thresh", 0.5))
         self.cons_thresh = float(hparams.get("cons_thresh", 0.5))
         self.proto_momentum = float(hparams.get("proto_momentum", 0.9))
-        self.entropy_quantile = float(hparams.get("entropy_quantile", 0.7))
+        self.entropy_quantile = float(hparams.get("entropy_quantile", hparams.get("stat_quantile", 0.7)))
         self.entropy_hist_len = int(hparams.get("entropy_hist_len", 256))
         self.lambda_reg = float(hparams.get("lambda_reg", 0.0))
+        self.active_search = NuSTAR_ActiveSearch(
+            num_control_points=self.num_control_points,
+            num_candidates=self.adv_num_candidates,
+            sigma=self.adv_sigma,
+        )
 
         mem_len = int(hparams.get("memory_size", 4096))
         mem_device = hparams.get("device", "cpu")
@@ -122,6 +203,8 @@ class ACCUP(BaseTestTimeAlgorithm):
         return model
 
     def get_adversarial_view(self, x, model):
+        if self.adv_sigma > 0.0 and self.adv_num_candidates > 0:
+            return self.active_search(x, model)
         factors = [0.0]
         for sigma in self.adv_sigmas:
             if sigma == 0:
@@ -200,6 +283,23 @@ class ACCUP(BaseTestTimeAlgorithm):
 
         loss = (adv_entropy * mask_float).mean()
         reg = self._fisher_regularizer(model, raw_logits, raw_preds)
+        self._last_gate_log = {
+            "mask_stat": mask_stat.detach().cpu(),
+            "mask_sem": mask_sem.detach().cpu(),
+            "mask_cons": mask_cons.detach().cpu(),
+            "active_mask": active_mask.detach().cpu(),
+            "stat_pass": int(mask_stat.sum().item()),
+            "sem_pass": int(mask_sem.sum().item()),
+            "cons_pass": int(mask_cons.sum().item()),
+            "active_pass": int(active_mask.sum().item()),
+        }
+        self._last_batch_log = {
+            "stat_gate_pass_rate": float(mask_stat.float().mean().item()),
+            "sem_gate_pass_rate": float(mask_sem.float().mean().item()),
+            "cons_gate_pass_rate": float(mask_cons.float().mean().item()),
+            "active_gate_pass_rate": float(active_mask.float().mean().item()),
+            "fisher_reg_value": float(reg.detach().item()),
+        }
         total_loss = loss + reg
 
         if optimizer is not None:
