@@ -140,9 +140,9 @@ class Load_ALL_Dataset(Dataset):
     def __len__(self):
         return self.len
 
-def data_generator_demo(data_path, domain_id, dataset_configs, hparams, dtype):
+def data_generator_demo(data_path, domain_id, dataset_configs, hparams, dtype, seed_id=1):
     dataset_file = safe_torch_load(os.path.join(data_path, f"{dtype}_{domain_id}.pt"))
-    dataset = Load_Dataset(dataset_file, dataset_configs)
+    dataset = Load_Dataset(dataset_file, dataset_configs, seed_id=seed_id)
     if dtype == "test":
         shuffle = False
         drop_last = hparams.get("drop_last_test", True)

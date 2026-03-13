@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from scripts.supplementary_utils import (
     RESULTS_ROOT,
     build_trainer,
+    cleanup_trainer,
     create_tta_model,
     dataset_scenarios,
     ensure_dir,
@@ -56,7 +57,7 @@ def ensure_pretrained_checkpoint(data_path, device, dataset, src_id, trg_id, pre
         non_adapted, pre_trained_model = trainer.pre_train()
         torch.save({"non_adapted": non_adapted, "model_state": pre_trained_model.state_dict()}, ckpt_path)
     finally:
-        trainer.summary_f1_scores.close()
+        cleanup_trainer(trainer, close_summary=True)
     return ckpt_path
 
 
@@ -86,7 +87,7 @@ def main():
             backbone=args.backbone,
         )
         scenarios = dataset_scenarios(probe_trainer)
-        probe_trainer.summary_f1_scores.close()
+        cleanup_trainer(probe_trainer, close_summary=True)
 
         for src_id, trg_id in scenarios:
             checkpoints = {
@@ -108,8 +109,10 @@ def main():
                             pretrained_checkpoint=str(ckpt_path),
                             backbone=args.backbone,
                         )
+                        tta_model = None
+                        pre_trained_model = None
                         try:
-                            tta_model, _ = create_tta_model(trainer, src_id, trg_id, run_seed=tta_seed)
+                            tta_model, pre_trained_model = create_tta_model(trainer, src_id, trg_id, run_seed=tta_seed)
                             f1 = float(trainer.calculate_metrics(tta_model)[1])
                             raw_rows.append(
                                 {
@@ -122,7 +125,7 @@ def main():
                                 }
                             )
                         finally:
-                            trainer.summary_f1_scores.close()
+                            cleanup_trainer(trainer, tta_model, pre_trained_model, close_summary=True)
 
     raw_df = pd.DataFrame(raw_rows)
     raw_df.to_csv(output_dir / "source_sensitivity_raw.csv", index=False)

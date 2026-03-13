@@ -1,5 +1,6 @@
 import argparse
 import collections
+import gc
 import os
 import sys
 from pathlib import Path
@@ -14,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 from optim.optimizer import build_optimizer
 from trainers.tta_trainer import TTATrainer
-from utils.utils import AverageMeter, EATAMemory, select_eata_indices, starting_logs
+from utils.utils import AverageMeter, EATAMemory, fix_randomness, select_eata_indices, starting_logs
 
 
 RESULTS_ROOT = ROOT / "results" / "tta_experiments_logs"
@@ -147,13 +148,12 @@ def build_trainer(
 
 
 def prepare_scenario(trainer, src_id, trg_id, run_seed=42, run_id=0):
+    fix_randomness(int(run_seed))
+    trainer._current_run_seed = int(run_seed)
     trainer.run_id = run_id
     trainer.set_scenario_hparams(src_id, trg_id)
     trainer._current_scenario = (str(src_id), str(trg_id))
-    if trainer.da_method == "NoAdap":
-        trainer.load_data(src_id, trg_id)
-    else:
-        trainer.load_data_demo(src_id, trg_id, run_seed)
+    trainer.load_data(src_id, trg_id)
     trainer.logger, trainer.scenario_log_dir = starting_logs(
         trainer.dataset,
         trainer.da_method,
@@ -194,6 +194,43 @@ def create_tta_model(trainer, src_id, trg_id, run_seed=42, run_id=0, save_checkp
     tta_model = tta_model.to(trainer.device)
     pre_trained_model.eval()
     return tta_model, pre_trained_model
+
+
+def cleanup_trainer(trainer, *models, close_summary=True):
+    for model in models:
+        if model is not None:
+            del model
+
+    summary_handle = getattr(trainer, "summary_f1_scores", None)
+    if close_summary and summary_handle is not None and not summary_handle.closed:
+        summary_handle.close()
+
+    logger = getattr(trainer, "logger", None)
+    if logger is not None:
+        for handler in list(logger.handlers):
+            try:
+                handler.close()
+            finally:
+                logger.removeHandler(handler)
+
+    for attr in (
+        "src_train_dl",
+        "src_val_dl",
+        "src_test_dl",
+        "trg_train_dl",
+        "trg_val_dl",
+        "trg_test_dl",
+        "trg_whole_dl",
+        "eata_memory",
+        "pre_loss_avg_meters",
+        "loss_avg_meters",
+    ):
+        if hasattr(trainer, attr):
+            setattr(trainer, attr, None)
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def extract_primary_tensor(data):

@@ -78,6 +78,22 @@ def tail_text(text, limit=4000):
     return text[-limit:]
 
 
+def tail_file(path, limit=4000):
+    if not path.exists():
+        return ""
+    with path.open("rb") as handle:
+        try:
+            handle.seek(-limit, 2)
+        except OSError:
+            handle.seek(0)
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def safe_print(text):
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
+
 def verify_ssaw_fix():
     output_dir = RESULTS_ROOT / "ssaw_fix"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +199,7 @@ def main():
     parser.add_argument("--backbone", default="CNN")
     parser.add_argument("--skip", nargs="*", default=[])
     parser.add_argument("--only", nargs="*", default=[])
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -266,6 +283,7 @@ def main():
         print(f"[Experiment {exp_num}] {spec['name']}")
         print("=" * 80)
         start = time.perf_counter()
+        log_path = RESULTS_ROOT / f"run_all_exp{exp_num}.log"
         cmd = [
             sys.executable,
             str(spec["script"]),
@@ -278,23 +296,27 @@ def main():
             "--backbone",
             args.backbone,
         ]
+        if args.force and exp_num == 1:
+            cmd.append("--force")
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            with log_path.open("w", encoding="utf-8") as log_handle:
+                proc = subprocess.run(cmd, stdout=log_handle, stderr=subprocess.STDOUT, text=True, check=False)
             elapsed = time.perf_counter() - start
-            print(proc.stdout)
-            if proc.stderr:
-                print(proc.stderr)
+            log_tail = tail_file(log_path)
+            if log_tail:
+                safe_print(log_tail)
             status = "SUCCESS" if proc.returncode == 0 else "FAILED"
-            error_summary = tail_text(proc.stderr) if proc.returncode != 0 else ""
+            error_summary = log_tail if proc.returncode != 0 else ""
             item = {
                 "id": exp_num,
                 "name": spec["name"],
                 "status": status,
                 "elapsed_sec": elapsed,
                 "output_dir": str(spec["output_dir"]),
+                "log_path": str(log_path),
                 "error_summary": error_summary,
-                "stdout_tail": tail_text(proc.stdout),
-                "stderr_tail": tail_text(proc.stderr),
+                "stdout_tail": log_tail,
+                "stderr_tail": "",
             }
             item["highlights"] = summarize_experiment_outputs(exp_num)
             summary_payload["experiments"].append(item)

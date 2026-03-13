@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.supplementary_utils import RESULTS_ROOT, build_trainer, ensure_dir
+from scripts.supplementary_utils import RESULTS_ROOT, build_trainer, cleanup_trainer, ensure_dir
 
 
 DATASETS = ["EEG", "HAR", "FD"]
@@ -71,7 +71,7 @@ def collect_results(data_path, device, seeds, backbone):
                     warnings.append(f"{dataset}-{method}-{first_scenario} produced identical F1 across seeds.")
                 all_frames.append(df[["dataset", "scenario", "method", "seed", "run", "f1"]])
             finally:
-                trainer.summary_f1_scores.close()
+                cleanup_trainer(trainer, close_summary=True)
     return pd.concat(all_frames, ignore_index=True), warnings
 
 

@@ -1,4 +1,8 @@
 import math
+import os
+from collections import deque
+from typing import Iterable, List, Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -6,20 +10,27 @@ import torch.nn.functional as F
 from scipy.interpolate import CubicSpline
 
 from algorithms.base_tta_algorithm import BaseTestTimeAlgorithm
-from utils.utils import EATAMemory, softmax_entropy_from_logits
+from utils.utils import safe_torch_load, softmax_entropy_from_logits
 
 
 class NuSTAR_ActiveSearch:
     """Piecewise amplitude search with natural cubic spline upsampling."""
 
-    def __init__(self, num_control_points=10, num_candidates=4, sigma=0.1):
-        self.num_control_points = int(num_control_points)
-        self.num_candidates = int(num_candidates)
+    def __init__(self, num_control_points: int = 10, num_candidates: int = 16, sigma: float = 0.1):
+        self.num_control_points = max(2, int(num_control_points))
+        self.num_candidates = max(0, int(num_candidates))
         self.sigma = float(sigma)
         self.last_warp_curve = None
         self.last_warp_curves = None
+        self.last_metadata = None
 
-    def _sample_control_points(self, batch_size, device, dtype):
+    def _sample_control_points(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        sigma: float,
+    ) -> torch.Tensor:
         base = torch.ones(
             batch_size,
             self.num_candidates,
@@ -27,134 +38,220 @@ class NuSTAR_ActiveSearch:
             device=device,
             dtype=dtype,
         )
-        if self.sigma <= 0.0 or self.num_candidates <= 0:
+        if sigma <= 0.0 or self.num_candidates <= 0:
             return base
-        noise = torch.randn_like(base) * self.sigma + 1.0
-        return noise.clamp(1.0 - self.sigma, 1.0 + self.sigma)
+        noise = torch.randn_like(base) * sigma + 1.0
+        return noise.clamp(1.0 - 3.0 * sigma, 1.0 + 3.0 * sigma)
 
     @staticmethod
-    def _natural_cubic_spline_upsample(k, target_len):
+    def _natural_cubic_spline_upsample(k: torch.Tensor, target_len: int) -> torch.Tensor:
         if k.dim() != 2:
-            raise ValueError(f"Expected control tensor with shape [N_cand, M], got {tuple(k.shape)}")
-        num_candidates, num_ctrl = k.shape
+            raise ValueError(f"Expected control tensor with shape [N, M], got {tuple(k.shape)}")
         if target_len <= 0:
             raise ValueError("target_len must be positive")
-        if num_ctrl == 1:
+        if k.size(1) == 1:
             return k.repeat(1, target_len)
 
         device = k.device
         dtype = k.dtype
-        ctrl_x = np.linspace(0, target_len - 1, num_ctrl, dtype=np.float64)
-        eval_x = np.linspace(0, target_len - 1, target_len, dtype=np.float64)
-        k_np = k.detach().cpu().numpy().astype(np.float64, copy=False)
-        curves = []
+        num_candidates, num_ctrl = k.shape
+        ctrl_x = np.linspace(0, target_len - 1, num_ctrl, dtype=np.float32)
+        eval_x = np.linspace(0, target_len - 1, target_len, dtype=np.float32)
+        k_np = k.detach().cpu().numpy().astype(np.float32, copy=False)
+        curves_np = np.empty((num_candidates, target_len), dtype=np.float32)
+
         for cand_idx in range(num_candidates):
             spline = CubicSpline(ctrl_x, k_np[cand_idx], bc_type="natural")
-            curves.append(spline(eval_x))
-        curves_np = np.stack(curves, axis=0)
+            curves_np[cand_idx] = spline(eval_x).astype(np.float32, copy=False)
+
         return torch.from_numpy(curves_np).to(device=device, dtype=dtype)
 
-    def __call__(self, x, model):
+    @staticmethod
+    def _extract_features(model, x: torch.Tensor) -> torch.Tensor:
+        feats = model.feature_extractor(x)
+        if isinstance(feats, (tuple, list)):
+            feats = feats[0]
+        return feats
+
+    @torch.no_grad()
+    def __call__(self, x: torch.Tensor, model, sigma: Optional[float] = None) -> torch.Tensor:
+        if x.dim() != 3:
+            raise ValueError(f"Expected x with shape [B, C, T], got {tuple(x.shape)}")
+
+        sigma = self.sigma if sigma is None else float(sigma)
         batch_size, channels, target_len = x.shape
-        if self.num_candidates <= 0 or self.sigma <= 0.0:
-            best_w = torch.ones(batch_size, 1, target_len, device=x.device, dtype=x.dtype)
-            self.last_warp_curves = best_w.detach().cpu()
-            self.last_warp_curve = best_w[:1].detach().cpu()
+        if self.num_candidates <= 0 or sigma <= 0.0:
+            warp = torch.ones(batch_size, 1, target_len, device=x.device, dtype=x.dtype)
+            self.last_warp_curves = warp.detach().cpu()
+            self.last_warp_curve = warp[:1].detach().cpu()
+            self.last_metadata = {
+                "mode": "identity",
+                "curve": warp.squeeze(1).detach().cpu(),
+                "control_points": torch.ones(batch_size, 1, device=x.device, dtype=x.dtype).cpu(),
+            }
             return x
 
-        controls = self._sample_control_points(batch_size, x.device, x.dtype)
+        controls = self._sample_control_points(batch_size, x.device, x.dtype, sigma)
         flat_controls = controls.reshape(batch_size * self.num_candidates, self.num_control_points)
         upsampled = self._natural_cubic_spline_upsample(flat_controls, target_len)
         warps = upsampled.reshape(batch_size, self.num_candidates, target_len)
         warped_x = x.unsqueeze(1) * warps.unsqueeze(2)
         flat_x = warped_x.reshape(batch_size * self.num_candidates, channels, target_len)
 
-        with torch.no_grad():
-            feats, _ = model.feature_extractor(flat_x)
-            logits = model.classifier(feats)
-            ent = softmax_entropy_from_logits(logits).reshape(batch_size, self.num_candidates)
-        best_idx = ent.argmax(dim=1)
-        best_w = warps[torch.arange(batch_size, device=x.device), best_idx].unsqueeze(1)
-        self.last_warp_curves = best_w.detach().cpu()
-        self.last_warp_curve = best_w[:1].detach().cpu()
-        return x * best_w
+        feats = self._extract_features(model, flat_x)
+        logits = model.classifier(feats)
+        entropy = softmax_entropy_from_logits(logits).reshape(batch_size, self.num_candidates)
+        best_idx = entropy.argmax(dim=1)
+        best_warp = warps[torch.arange(batch_size, device=x.device), best_idx]
+
+        self.last_warp_curves = best_warp.unsqueeze(1).detach().cpu()
+        self.last_warp_curve = best_warp[:1].unsqueeze(1).detach().cpu()
+        self.last_metadata = {
+            "mode": "piecewise_search",
+            "curve": best_warp.detach().cpu(),
+            "control_points": controls[torch.arange(batch_size, device=x.device), best_idx].detach().cpu(),
+            "score": entropy[torch.arange(batch_size, device=x.device), best_idx].detach().cpu(),
+        }
+        return x * best_warp.unsqueeze(1)
 
 
 class ACCUP(BaseTestTimeAlgorithm):
-    """
-    NuSTAR: adversarial amplitude search + triple gate reliability before entropy minimization.
-    """
+    """NuSTAR-compatible ACCUP implementation."""
 
     def __init__(self, configs, hparams, model, optimizer):
+        self.num_classes = int(configs.num_classes)
+        self.last_adv_metadata = None
+        self._last_gate_log = {}
+        self._last_batch_log = {}
+        self._zero_active_streak = 0
         super().__init__(configs, hparams, model, optimizer)
 
-        self.num_classes = configs.num_classes
-        self.adv_sigmas = self._parse_sigmas(hparams.get("adv_sigmas", [0.0]))
-        self.adv_sigma = float(hparams.get("adv_sigma", max([abs(s) for s in self.adv_sigmas], default=0.0)))
-        self.adv_num_candidates = int(hparams.get("adv_num_candidates", 4 if self.adv_sigma > 0.0 else 0))
-        self.num_control_points = int(hparams.get("num_control_points", 10))
-        self.sem_thresh = float(hparams.get("sem_thresh", 0.5))
-        self.cons_thresh = float(hparams.get("cons_thresh", 0.5))
-        self.proto_momentum = float(hparams.get("proto_momentum", 0.9))
-        self.entropy_quantile = float(hparams.get("entropy_quantile", hparams.get("stat_quantile", 0.7)))
-        self.entropy_hist_len = int(hparams.get("entropy_hist_len", 256))
-        self.lambda_reg = float(hparams.get("lambda_reg", 0.0))
+        self.featurizer = self.model.feature_extractor
+        self.classifier = self.model.classifier
+
+        default_sigmas = hparams.get("adv_sigmas", [hparams.get("adv_sigma", 0.1)])
+        self.adv_sigmas = self._build_adv_sigmas(default_sigmas)
+        adv_sigma = hparams.get("adv_sigma", None)
+        if adv_sigma is None:
+            adv_sigma = max((abs(s) for s in self.adv_sigmas), default=0.0)
+        self.adv_sigma = float(adv_sigma)
+        self.adv_ctrl_points = int(
+            hparams.get(
+                "adv_ctrl_points",
+                hparams.get("adv_num_control_points", hparams.get("num_control_points", hparams.get("adv_control_points", 10))),
+            )
+        )
+        default_candidates = 16 if self.adv_sigma > 0.0 else 0
+        self.adv_num_candidates = int(hparams.get("adv_num_candidates", default_candidates))
+        self.enable_ssaw = bool(hparams.get("enable_ssaw", True))
         self.active_search = NuSTAR_ActiveSearch(
-            num_control_points=self.num_control_points,
+            num_control_points=self.adv_ctrl_points,
             num_candidates=self.adv_num_candidates,
             sigma=self.adv_sigma,
         )
 
-        mem_len = int(hparams.get("memory_size", 4096))
-        mem_device = hparams.get("device", "cpu")
-        self.eata_memory = getattr(self, "eata_memory", None) or EATAMemory(maxlen=mem_len, device=mem_device)
+        self.enable_stat_gate = bool(hparams.get("enable_stat_gate", True))
+        self.enable_semantic_gate = bool(hparams.get("enable_semantic_gate", True))
+        self.enable_consistency_gate = bool(hparams.get("enable_consistency_gate", True))
+        self.enable_gate_relaxation = bool(hparams.get("enable_gate_relaxation", False))
+        self.gate_relaxation_patience = max(1, int(hparams.get("gate_relaxation_patience", 4)))
+        self.sem_relax_step = float(hparams.get("sem_relax_step", 0.05))
+        self.cons_relax_step = float(hparams.get("cons_relax_step", 0.05))
+        self.max_relax_steps = max(0, int(hparams.get("max_relax_steps", 4)))
 
-        prototypes = self._init_prototypes()
-        self.register_buffer("prototypes", prototypes)
-        self._entropy_history = None
-        self._fisher_diag = None
-        self._fisher_count = 0
-        self._theta0 = {
+        self.sem_thresh = float(hparams.get("sem_thresh", 0.5))
+        self.cons_thresh = float(hparams.get("cons_thresh", 0.5))
+        self.proto_momentum = float(hparams.get("proto_momentum", 0.9))
+        self.include_warmup_support = bool(hparams.get("include_warmup_support", False))
+        self.warmup_min = max(1, int(hparams.get("warmup_min", 1)))
+
+        self.stat_quantile = float(hparams.get("stat_quantile", hparams.get("entropy_quantile", 0.7)))
+        self.stat_window = int(hparams.get("stat_window", hparams.get("entropy_hist_len", 512)))
+        self.stat_min_history = int(hparams.get("stat_min_history", 32))
+        self.stat_min_entropy = float(hparams.get("stat_min_entropy", 0.0))
+        self.entropy_history = deque(maxlen=max(1, self.stat_window))
+
+        self.prototypes: Optional[torch.Tensor] = None
+        self.proto_counts: Optional[torch.Tensor] = None
+        self._init_prototypes_from_model()
+
+        self.lambda_reg = float(hparams.get("lambda_reg", hparams.get("fisher_alpha", 0.0)))
+        self.max_fisher_updates = int(hparams.get("max_fisher_updates", -1))
+        self.use_online_fisher = bool(hparams.get("online_fisher", True))
+        self._online_fisher = None
+        self._fisher_samples = 0
+        self._fisher_updates = 0
+        self.fishers = hparams.get("fisher_state", None)
+        fisher_path = hparams.get("fisher_path")
+        if self.fishers is None and fisher_path and os.path.exists(fisher_path):
+            self.fishers = safe_torch_load(fisher_path, map_location="cpu")
+        self.theta_src = {
             n: p.detach().clone()
             for n, p in self.model.named_parameters()
             if p.requires_grad
         }
-
-    @staticmethod
-    def _parse_sigmas(sigmas):
-        if isinstance(sigmas, (int, float)):
-            sigmas = [float(sigmas)]
-        elif isinstance(sigmas, str):
-            sigmas = [float(s.strip()) for s in sigmas.split(",") if s.strip()]
-        return [float(s) for s in sigmas] if sigmas else [0.0]
-
-    def _init_prototypes(self):
-        device = next(self.model.parameters()).device
-        warmup = None
-
-        if hasattr(self.model, "classifier"):
-            if hasattr(self.model.classifier, "logits"):
-                warmup = self.model.classifier.logits.weight.data.detach()
-            elif hasattr(self.model.classifier, "weight"):
-                warmup = self.model.classifier.weight.data.detach()
-
-        if warmup is not None:
-            feat_dim = warmup.shape[1]
-            prototypes = warmup.clone()
-        else:
-            feat_dim = getattr(self.model.classifier, "in_features", None)
-            if feat_dim is None:
-                feat_dim = getattr(self.configs, "final_out_channels", 1) * getattr(self.configs, "features_len", 1)
-            prototypes = torch.zeros(self.num_classes, int(feat_dim), device=device)
-
-        prototypes = F.normalize(prototypes, dim=1)
-        return prototypes.to(device)
+        self._selected_counter = 0
+        self.eata_memory = getattr(self, "eata_memory", None)
 
     def set_eata_memory(self, memory):
         self.eata_memory = memory
 
+    def _build_adv_sigmas(self, sigmas: Iterable[float]) -> List[float]:
+        if isinstance(sigmas, (int, float)):
+            sigmas = [float(sigmas)]
+        elif isinstance(sigmas, str):
+            sigmas = [float(s.strip()) for s in sigmas.split(",") if s.strip()]
+
+        seen = set()
+        ordered = []
+        for sigma in sigmas:
+            sigma = float(sigma)
+            for value in (0.0, abs(sigma), -abs(sigma)):
+                if value not in seen:
+                    ordered.append(value)
+                    seen.add(value)
+        return ordered or [0.0]
+
+    def _init_prototypes_from_model(self):
+        if not self.include_warmup_support:
+            self.prototypes = None
+            self.proto_counts = None
+            return
+
+        init_proto = None
+        if hasattr(self.classifier, "logits") and hasattr(self.classifier.logits, "weight"):
+            warmup = self.classifier.logits.weight.data.detach()
+            if warmup.dim() == 2 and warmup.size(0) == self.num_classes:
+                init_proto = F.normalize(warmup, dim=1)
+        elif hasattr(self.classifier, "weight"):
+            warmup = self.classifier.weight.data.detach()
+            if warmup.dim() == 2 and warmup.size(0) == self.num_classes:
+                init_proto = F.normalize(warmup, dim=1)
+
+        if init_proto is None:
+            self.prototypes = None
+            self.proto_counts = None
+            return
+
+        self.prototypes = init_proto
+        self.proto_counts = torch.full(
+            (self.num_classes,),
+            self.warmup_min,
+            dtype=torch.long,
+            device=init_proto.device,
+        )
+
+    def _ensure_prototypes(self, feats: torch.Tensor):
+        feat_dim = feats.size(1)
+        device = feats.device
+        if self.prototypes is None or self.prototypes.numel() == 0 or self.prototypes.size(1) != feat_dim:
+            self.prototypes = torch.zeros(self.num_classes, feat_dim, device=device)
+            self.proto_counts = torch.zeros(self.num_classes, dtype=torch.long, device=device)
+        else:
+            self.prototypes = self.prototypes.to(device)
+            self.proto_counts = self.proto_counts.to(device)
+
     def configure_model(self, model):
-        """Unfreeze adaptation parameters (default: BN affine + backbone + classifier)."""
         model.train()
         model.requires_grad_(False)
 
@@ -178,23 +275,19 @@ class ACCUP(BaseTestTimeAlgorithm):
                     if module.bias is not None:
                         module.bias.requires_grad_(True)
 
-        if train_full_backbone:
-            for param in model.feature_extractor.parameters():
-                param.requires_grad_(True)
-        elif train_backbone_modules:
-            target_names = set(
-                train_backbone_modules if isinstance(train_backbone_modules, (list, tuple, set)) else [train_backbone_modules]
-            )
-            for name, module in model.feature_extractor.named_modules():
-                if name in target_names:
-                    for param in module.parameters():
-                        param.requires_grad_(True)
-        else:
-            for name, module in model.feature_extractor.named_children():
-                if name in ("conv_block1", "conv_block2", "conv_block3"):
-                    for sub_module in module.children():
-                        if isinstance(sub_module, nn.Conv1d):
-                            sub_module.requires_grad_(True)
+        if hasattr(model, "feature_extractor"):
+            if train_full_backbone:
+                for param in model.feature_extractor.parameters():
+                    param.requires_grad_(True)
+            elif train_backbone_modules:
+                target_names = train_backbone_modules
+                if not isinstance(target_names, (list, tuple, set)):
+                    target_names = [target_names]
+                target_names = {str(name) for name in target_names}
+                for name, module in model.feature_extractor.named_modules():
+                    if name in target_names:
+                        for param in module.parameters():
+                            param.requires_grad_(True)
 
         if train_classifier and hasattr(model, "classifier"):
             for param in model.classifier.parameters():
@@ -202,175 +295,280 @@ class ACCUP(BaseTestTimeAlgorithm):
 
         return model
 
-    def get_adversarial_view(self, x, model):
-        if self.adv_sigma > 0.0 and self.adv_num_candidates > 0:
-            return self.active_search(x, model)
-        factors = [0.0]
-        for sigma in self.adv_sigmas:
-            if sigma == 0:
-                continue
-            factors.extend([sigma, -sigma])
+    @staticmethod
+    def _extract_primary_tensor(batch_data):
+        if isinstance(batch_data, dict):
+            data = batch_data.get("data")
+            return data[0] if isinstance(data, (list, tuple)) else data
+        if isinstance(batch_data, (list, tuple)):
+            return batch_data[0]
+        return batch_data
 
-        factors_tensor = torch.tensor(factors, device=x.device, dtype=x.dtype)
-        batch_size = x.size(0)
-        best_entropy = torch.full((batch_size,), float("-inf"), device=x.device, dtype=x.dtype)
-        best_factor = torch.zeros(batch_size, device=x.device, dtype=x.dtype)
+    @staticmethod
+    def _extract_features(model, x: torch.Tensor) -> torch.Tensor:
+        feats = model.feature_extractor(x)
+        if isinstance(feats, (tuple, list)):
+            feats = feats[0]
+        return feats
 
-        for factor in factors_tensor:
-            x_view = x * (1.0 + factor)
-            with torch.no_grad():
-                feats, _ = model.feature_extractor(x_view)
-                logits = model.classifier(feats)
-                ent = softmax_entropy_from_logits(logits)
-            better = ent > best_entropy
-            best_entropy = torch.where(better, ent, best_entropy)
-            best_factor = torch.where(better, torch.full_like(best_factor, factor), best_factor)
+    def _entropy_threshold(self, entropy: torch.Tensor) -> torch.Tensor:
+        if len(self.entropy_history) >= self.stat_min_history:
+            history = torch.tensor(list(self.entropy_history), device=entropy.device, dtype=entropy.dtype)
+            threshold = torch.quantile(history, self.stat_quantile)
+        else:
+            threshold = entropy.new_tensor(math.log(max(2, self.num_classes)))
+        return torch.clamp(threshold, min=self.stat_min_entropy)
 
-        reshape_dims = (batch_size,) + (1,) * (x.dim() - 1)
-        return x * (1.0 + best_factor.view(reshape_dims))
+    def _update_entropy_history(self, entropy: torch.Tensor):
+        self.entropy_history.extend(entropy.detach().cpu().tolist())
 
-    @torch.no_grad()
-    def update_prototypes(self, feats, labels):
+    def _relaxation_level(self) -> int:
+        if not self.enable_gate_relaxation or self._zero_active_streak < self.gate_relaxation_patience:
+            return 0
+        return min(self.max_relax_steps, self._zero_active_streak // self.gate_relaxation_patience)
+
+    def _effective_gate_thresholds(self):
+        level = self._relaxation_level()
+        sem_thresh = self.sem_thresh - level * self.sem_relax_step
+        cons_thresh = self.cons_thresh + level * self.cons_relax_step
+        return sem_thresh, cons_thresh, level
+
+    def get_adversarial_view(self, x: torch.Tensor, model) -> torch.Tensor:
+        if not self.enable_ssaw or self.adv_sigma <= 0.0 or self.adv_num_candidates <= 0:
+            self.last_adv_metadata = {
+                "mode": "disabled",
+                "curve": torch.ones(x.size(0), x.size(-1), device=x.device, dtype=x.dtype).cpu(),
+            }
+            return x
+        adv_view = self.active_search(x, model, sigma=self.adv_sigma)
+        self.last_adv_metadata = self.active_search.last_metadata
+        return adv_view
+
+    def update_prototypes(self, feats: torch.Tensor, labels: torch.Tensor):
+        self.update_prototypes_with_weights(feats, labels, weights=None)
+
+    def update_prototypes_with_weights(
+        self,
+        feats: torch.Tensor,
+        labels: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
+    ):
         if feats.numel() == 0:
             return
+        self._ensure_prototypes(feats)
         feats = F.normalize(feats, dim=1)
-        proto = self.prototypes
-        momentum = self.proto_momentum
-        for cls in labels.unique():
-            cls = int(cls)
-            mask = labels == cls
-            if not mask.any():
+        for cls_idx in range(self.num_classes):
+            mask = labels == cls_idx
+            if not torch.any(mask):
                 continue
-            cls_feat = feats[mask].mean(dim=0, keepdim=True)
-            updated = momentum * proto[cls : cls + 1] + (1.0 - momentum) * cls_feat
-            proto[cls : cls + 1] = F.normalize(updated, dim=1)
+            if weights is None:
+                class_mean = feats[mask].mean(dim=0)
+            else:
+                class_weights = weights[mask].clamp_min(0.0)
+                if float(class_weights.sum().item()) == 0.0:
+                    continue
+                class_weights = class_weights / class_weights.sum()
+                class_mean = (feats[mask] * class_weights.unsqueeze(1)).sum(dim=0)
+            if int(self.proto_counts[cls_idx].item()) == 0:
+                self.prototypes[cls_idx] = class_mean
+            else:
+                self.prototypes[cls_idx] = (
+                    self.proto_momentum * self.prototypes[cls_idx]
+                    + (1.0 - self.proto_momentum) * class_mean
+                )
+            self.prototypes[cls_idx] = F.normalize(self.prototypes[cls_idx], dim=0)
+            self.proto_counts[cls_idx] += int(mask.sum().item())
 
-    @torch.enable_grad()
-    def forward_and_adapt(self, batch_data, model, optimizer):
-        raw_data = batch_data[0] if isinstance(batch_data, (list, tuple)) else batch_data
+    def _maybe_update_online_fisher(self, model, logits: torch.Tensor):
+        if not self.use_online_fisher or self.lambda_reg <= 0 or logits is None or not logits.requires_grad:
+            return
+        if self.max_fisher_updates >= 0 and self._fisher_updates >= self.max_fisher_updates:
+            return
 
+        trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+        if not trainable:
+            return
+        if self._online_fisher is None:
+            self._online_fisher = {n: torch.zeros_like(p) for n, p in trainable}
+
+        names, params = zip(*trainable)
+        probs = torch.softmax(logits, dim=1)
+        log_probs = torch.log_softmax(logits, dim=1)
+        fisher_loss = -(probs * log_probs).sum(dim=1).mean()
+        grads = torch.autograd.grad(fisher_loss, params, retain_graph=True, allow_unused=True)
+        any_update = False
+        for name, grad in zip(names, grads):
+            if grad is None:
+                continue
+            self._online_fisher[name] = self._online_fisher[name].to(grad.device)
+            self._online_fisher[name] += grad.detach() ** 2
+            any_update = True
+        if any_update:
+            self._fisher_samples += logits.size(0)
+            self._fisher_updates += 1
+
+    def _fisher_regularizer(self, model) -> torch.Tensor:
+        device = next(model.parameters()).device
+        if self.lambda_reg <= 0:
+            return torch.zeros([], device=device)
+
+        reg = None
+        if isinstance(self.fishers, dict) and self.fishers:
+            for name, param in model.named_parameters():
+                if not param.requires_grad or name not in self.fishers:
+                    continue
+                item = self.fishers[name]
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    diag, theta_prev = item[0], item[1]
+                else:
+                    diag = item
+                    theta_prev = self.theta_src.get(name)
+                if theta_prev is None:
+                    continue
+                term = (diag.to(device) * (param - theta_prev.to(device)) ** 2).sum()
+                reg = term if reg is None else reg + term
+            if reg is not None:
+                return self.lambda_reg * reg
+
+        if self._online_fisher and self._fisher_samples > 0:
+            normalizer = float(self._fisher_samples)
+            for name, param in model.named_parameters():
+                if not param.requires_grad or name not in self._online_fisher:
+                    continue
+                theta_prev = self.theta_src.get(name, param.detach()).to(device)
+                diag = (self._online_fisher[name] / normalizer).to(device)
+                term = (diag * (param - theta_prev) ** 2).sum()
+                reg = term if reg is None else reg + term
+            if reg is not None:
+                return self.lambda_reg * reg
+
+        return torch.zeros([], device=device)
+
+    def _forward_and_adapt_impl(self, raw_data: torch.Tensor, model, optimizer):
         x_adv = self.get_adversarial_view(raw_data, model)
 
-        with torch.no_grad():
-            raw_feats, _ = model.feature_extractor(raw_data)
-            raw_logits = model.classifier(raw_feats)
-            raw_probs = torch.softmax(raw_logits, dim=1)
-            raw_preds = raw_probs.argmax(dim=1)
-            raw_entropy = softmax_entropy_from_logits(raw_logits)
+        raw_feats = self._extract_features(model, raw_data)
+        raw_logits = model.classifier(raw_feats)
+        raw_probs = F.softmax(raw_logits, dim=1)
+        raw_entropy = softmax_entropy_from_logits(raw_logits)
 
-        adv_feats, _ = model.feature_extractor(x_adv)
+        adv_feats = self._extract_features(model, x_adv)
         adv_logits = model.classifier(adv_feats)
-        adv_probs = torch.softmax(adv_logits, dim=1)
+        adv_probs = F.softmax(adv_logits, dim=1)
         adv_entropy = softmax_entropy_from_logits(adv_logits)
 
-        # Gate 1: statistical (entropy quantile over history)
-        mask_stat = self._statistical_gate(raw_entropy)
+        self._maybe_update_online_fisher(model, raw_logits)
+        self._ensure_prototypes(raw_feats)
 
-        # Gate 2: semantic consistency with prototypes
+        pred_labels = raw_probs.argmax(dim=1)
+        p_bar = 0.5 * (raw_probs + adv_probs)
+        stat_entropy = -(p_bar * p_bar.clamp_min(1e-8).log()).sum(dim=1)
+        entropy_threshold = self._entropy_threshold(stat_entropy.detach())
+        mask_stat = stat_entropy <= entropy_threshold if self.enable_stat_gate else torch.ones_like(pred_labels, dtype=torch.bool)
+        self._update_entropy_history(stat_entropy)
+
+        sem_thresh, cons_thresh, relaxation_level = self._effective_gate_thresholds()
         feat_norm = F.normalize(raw_feats.detach(), dim=1)
-        proto_available = (self.prototypes.abs().sum(dim=1) > 0).to(feat_norm.device)
-        proto_norm = F.normalize(self.prototypes.to(feat_norm.device), dim=1)
-        proto_for_sample = proto_norm[raw_preds]
-        has_proto = proto_available[raw_preds]
-        sim = (feat_norm * proto_for_sample).sum(dim=1)
-        mask_sem = torch.where(has_proto, sim >= self.sem_thresh, torch.ones_like(sim, dtype=torch.bool))
+        proto_vecs = self.prototypes[pred_labels]
+        proto_norm = F.normalize(proto_vecs.detach(), dim=1)
+        proto_ready = self.proto_counts[pred_labels] >= self.warmup_min
+        proto_nonzero = proto_vecs.detach().abs().sum(dim=1) > 0
+        cos_sim = F.cosine_similarity(feat_norm, proto_norm, dim=1)
+        if self.enable_semantic_gate:
+            mask_sem = (~proto_ready) | (~proto_nonzero) | (cos_sim >= sem_thresh)
+        else:
+            mask_sem = torch.ones_like(pred_labels, dtype=torch.bool)
 
-        # Gate 3: prediction consistency under attack (KL raw || adv)
-        mask_cons, kl = self._consistency_gate(raw_probs, adv_probs)
+        log_adv = adv_probs.detach().clamp_min(1e-8).log()
+        kl_div = F.kl_div(log_adv, raw_probs.detach(), reduction="none").sum(dim=1)
+        if self.enable_consistency_gate:
+            mask_cons = kl_div <= cons_thresh
+        else:
+            mask_cons = torch.ones_like(pred_labels, dtype=torch.bool)
 
         active_mask = mask_stat & mask_sem & mask_cons
-        mask_float = active_mask.float()
+        active_count = int(active_mask.sum().item())
+        self._selected_counter += active_count
+        self._zero_active_streak = 0 if active_count > 0 else (self._zero_active_streak + 1)
 
-        loss = (adv_entropy * mask_float).mean()
-        reg = self._fisher_regularizer(model, raw_logits, raw_preds)
+        reg_loss = self._fisher_regularizer(model)
+        loss_adv = adv_entropy[active_mask].mean() if active_mask.any() else adv_entropy.new_zeros([])
+        total_loss = loss_adv + reg_loss
+
+        if optimizer is not None and total_loss.requires_grad:
+            optimizer.zero_grad(set_to_none=True)
+            total_loss.backward()
+            optimizer.step()
+
+        quality = 1.0 - (stat_entropy.detach() / math.log(max(2, self.num_classes)))
+        quality = quality.clamp(min=0.0, max=1.0)
+        with torch.no_grad():
+            if active_mask.any():
+                self.update_prototypes_with_weights(
+                    raw_feats.detach()[active_mask],
+                    pred_labels.detach()[active_mask],
+                    quality[active_mask],
+                )
+            elif (self.proto_counts is not None) and torch.any(self.proto_counts < self.warmup_min):
+                warmup_mask = mask_stat & mask_cons
+                if warmup_mask.any():
+                    self.update_prototypes_with_weights(
+                        raw_feats.detach()[warmup_mask],
+                        pred_labels.detach()[warmup_mask],
+                        quality[warmup_mask],
+                    )
+            if self.eata_memory is not None:
+                self.eata_memory.push(raw_feats.detach(), raw_probs.detach())
+
         self._last_gate_log = {
             "mask_stat": mask_stat.detach().cpu(),
             "mask_sem": mask_sem.detach().cpu(),
             "mask_cons": mask_cons.detach().cpu(),
             "active_mask": active_mask.detach().cpu(),
-            "stat_pass": int(mask_stat.sum().item()),
-            "sem_pass": int(mask_sem.sum().item()),
-            "cons_pass": int(mask_cons.sum().item()),
-            "active_pass": int(active_mask.sum().item()),
+            "stat_indices": mask_stat.detach().cpu().tolist(),
+            "sem_indices": mask_sem.detach().cpu().tolist(),
+            "cons_indices": mask_cons.detach().cpu().tolist(),
+            "active_indices": active_mask.detach().cpu().tolist(),
+            "entropy_threshold": float(entropy_threshold.detach().item()),
+            "sem_threshold": float(sem_thresh),
+            "cons_threshold": float(cons_thresh),
+            "relaxation_level": int(relaxation_level),
         }
         self._last_batch_log = {
             "stat_gate_pass_rate": float(mask_stat.float().mean().item()),
             "sem_gate_pass_rate": float(mask_sem.float().mean().item()),
             "cons_gate_pass_rate": float(mask_cons.float().mean().item()),
             "active_gate_pass_rate": float(active_mask.float().mean().item()),
-            "fisher_reg_value": float(reg.detach().item()),
+            "fisher_reg_value": float(reg_loss.detach().item()),
+            "batch_entropy": float(raw_entropy.mean().item()),
+            "adv_entropy": float(adv_entropy.mean().item()),
+            "kl_mean": float(kl_div.mean().item()),
+            "sem_threshold": float(sem_thresh),
+            "cons_threshold": float(cons_thresh),
+            "relaxation_level": int(relaxation_level),
         }
-        total_loss = loss + reg
+        return {
+            "raw_logits": raw_logits,
+            "raw_probs": raw_probs,
+            "pred_labels": pred_labels,
+            "raw_feats": raw_feats,
+            "mask_stat": mask_stat,
+            "mask_sem": mask_sem,
+            "mask_cons": mask_cons,
+            "active_mask": active_mask,
+            "raw_entropy": raw_entropy,
+            "adv_entropy": adv_entropy,
+            "stat_entropy": stat_entropy,
+            "kl_div": kl_div,
+            "reg_loss": reg_loss,
+            "total_loss": total_loss,
+        }
 
-        if optimizer is not None:
-            optimizer.zero_grad(set_to_none=True)
-            total_loss.backward()
-            optimizer.step()
+    @torch.enable_grad()
+    def forward_and_adapt(self, batch_data, model, optimizer):
+        raw_data = self._extract_primary_tensor(batch_data)
+        outputs = self._forward_and_adapt_impl(raw_data, model, optimizer)
+        return outputs["raw_logits"]
 
-        with torch.no_grad():
-            if active_mask.any():
-                self.update_prototypes(raw_feats[active_mask], raw_preds[active_mask])
-            if self.eata_memory is not None:
-                self.eata_memory.push(raw_feats, raw_probs)
-            try:
-                self._selected_counter = getattr(self, "_selected_counter", 0) + int(active_mask.sum().item())
-            except Exception:
-                pass
 
-        return raw_logits
-
-    def _update_entropy_history(self, entropy: torch.Tensor):
-        ent_detached = entropy.detach()
-        if self._entropy_history is None:
-            self._entropy_history = ent_detached[-self.entropy_hist_len :]
-        else:
-            self._entropy_history = torch.cat([self._entropy_history, ent_detached], dim=0)[-self.entropy_hist_len :]
-        return self._entropy_history
-
-    def _statistical_gate(self, entropy: torch.Tensor):
-        history = self._update_entropy_history(entropy)
-        if history.numel() == 0:
-            threshold = math.log(max(2, self.num_classes))
-        else:
-            threshold = torch.quantile(history, self.entropy_quantile).item()
-        return entropy <= threshold
-
-    def _consistency_gate(self, raw_probs, adv_probs):
-        adv_probs_safe = adv_probs.clamp_min(1e-8)
-        raw_probs_safe = raw_probs.clamp_min(1e-8)
-        kl = F.kl_div(raw_probs_safe.log(), adv_probs_safe, reduction="none").sum(dim=1)
-        return kl <= self.cons_thresh, kl
-
-    def _fisher_regularizer(self, model, raw_logits, raw_preds):
-        if self.lambda_reg <= 0.0 or self._theta0 is None:
-            return raw_logits.new_zeros(())
-
-        params = [p for p in model.parameters() if p.requires_grad]
-        names = [n for n, p in model.named_parameters() if p.requires_grad]
-
-        log_probs = torch.log_softmax(raw_logits, dim=1)
-        fisher_loss = F.nll_loss(log_probs, raw_preds, reduction="mean")
-        grads = torch.autograd.grad(fisher_loss, params, retain_graph=True, allow_unused=True)
-
-        if self._fisher_diag is None:
-            self._fisher_diag = {n: torch.zeros_like(p) for n, p in zip(names, params)}
-
-        for name, grad in zip(names, grads):
-            if grad is None:
-                continue
-            self._fisher_diag[name] = self._fisher_diag[name] + grad.detach() ** 2
-        self._fisher_count += 1
-
-        reg = None
-        normalizer = float(max(1, self._fisher_count))
-        for name, p in model.named_parameters():
-            if not p.requires_grad or name not in self._theta0 or name not in self._fisher_diag:
-                continue
-            diag = self._fisher_diag[name] / normalizer
-            delta = p - self._theta0[name].to(p.device)
-            term = (diag * delta * delta).sum()
-            reg = term if reg is None else reg + term
-
-        if reg is None:
-            return raw_logits.new_zeros(())
-        return self.lambda_reg * reg
+NuSTAR = ACCUP

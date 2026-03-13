@@ -205,8 +205,12 @@ class TTAAbstractTrainer(object):
         self.trg_whole_dl = whole_targe_data_generator(self.data_path, trg_id, self.dataset_configs, self.hparams)
 
     def load_data_demo(self, src_id, trg_id, run_id = 0): #加载数据集（带增强版本）
-        self.src_train_dl = data_generator_demo(self.data_path, src_id, self.dataset_configs, self.hparams, "train")
-        self.src_test_dl = data_generator_demo(self.data_path, src_id, self.dataset_configs, self.hparams, "test")
+        self.src_train_dl = data_generator_demo(
+            self.data_path, src_id, self.dataset_configs, self.hparams, "train", seed_id=run_id
+        )
+        self.src_test_dl = data_generator_demo(
+            self.data_path, src_id, self.dataset_configs, self.hparams, "test", seed_id=run_id
+        )
         self.trg_whole_dl = whole_targe_data_generator_demo(self.data_path, trg_id, self.dataset_configs, self.hparams, seed_id = run_id)
 
     def create_save_dir(self, save_dir): #创建保存目录
@@ -364,6 +368,9 @@ class TTAAbstractTrainer(object):
         format_func = lambda x: f"{x:.4f}" if isinstance(x, float) else x
 
         # Apply the formatting function to each element in the tables
-        table = table.applymap(format_func)
+        if hasattr(table, "map"):
+            table = table.map(format_func)
+        else:
+            table = table.applymap(format_func)
 
         return table

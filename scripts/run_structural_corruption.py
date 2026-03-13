@@ -16,6 +16,7 @@ from scripts.supplementary_utils import (
     BatchTransformLoader,
     RESULTS_ROOT,
     build_trainer,
+    cleanup_trainer,
     create_tta_model,
     dataset_scenarios,
     ensure_dir,
@@ -52,26 +53,36 @@ def evaluate_once(data_path, device, dataset, method, corruption_type, severity,
     rows = []
     try:
         for src_id, trg_id in dataset_scenarios(trainer):
-            tta_model, _ = create_tta_model(trainer, src_id, trg_id, run_seed=seed)
-            trainer.trg_whole_dl = BatchTransformLoader(
-                trainer.trg_whole_dl,
-                CORRUPTION_REGISTRY[corruption_type],
-                severity,
+            print(
+                f"[Scenario] dataset={dataset} method={method} corruption={corruption_type} "
+                f"severity={severity} seed={seed} scenario={src_id}->{trg_id}",
+                flush=True,
             )
-            metrics = trainer.calculate_metrics(tta_model)
-            rows.append(
-                {
-                    "dataset": dataset,
-                    "corruption_type": corruption_type,
-                    "severity": severity,
-                    "method": method,
-                    "seed": seed,
-                    "scenario": f"{src_id}->{trg_id}",
-                    "f1": float(metrics[1]),
-                }
-            )
+            tta_model = None
+            pre_trained_model = None
+            try:
+                tta_model, pre_trained_model = create_tta_model(trainer, src_id, trg_id, run_seed=seed)
+                trainer.trg_whole_dl = BatchTransformLoader(
+                    trainer.trg_whole_dl,
+                    CORRUPTION_REGISTRY[corruption_type],
+                    severity,
+                )
+                metrics = trainer.calculate_metrics(tta_model)
+                rows.append(
+                    {
+                        "dataset": dataset,
+                        "corruption_type": corruption_type,
+                        "severity": severity,
+                        "method": method,
+                        "seed": seed,
+                        "scenario": f"{src_id}->{trg_id}",
+                        "f1": float(metrics[1]),
+                    }
+                )
+            finally:
+                cleanup_trainer(trainer, tta_model, pre_trained_model, close_summary=False)
     finally:
-        trainer.summary_f1_scores.close()
+        cleanup_trainer(trainer)
     return rows
 
 
@@ -144,11 +155,31 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seeds", default="41,42,43")
     parser.add_argument("--backbone", default="CNN")
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     output_dir = ensure_dir(RESULTS_ROOT / "structural_corruption")
+    raw_path = output_dir / "raw_results.csv"
+    progress_path = output_dir / "progress.txt"
+    completed_keys = set()
     all_rows = []
+    if raw_path.exists() and not args.force:
+        existing_df = pd.read_csv(raw_path)
+        if not existing_df.empty:
+            all_rows = existing_df.to_dict("records")
+            completed_keys = {
+                (
+                    str(row["dataset"]),
+                    str(row["method"]),
+                    str(row["corruption_type"]),
+                    str(row["severity"]),
+                    int(row["seed"]),
+                )
+                for row in all_rows
+            }
     seeds = parse_seed_list(args.seeds)
+    total_jobs = len(DATASETS) * len(CORRUPTION_TYPES) * len(SEVERITIES) * len(DA_METHODS) * len(seeds)
+    job_idx = 0
 
     for dataset in DATASETS:
         if not (Path(args.data_path) / dataset).exists():
@@ -158,21 +189,35 @@ def main():
             for severity in SEVERITIES:
                 for method in DA_METHODS:
                     for seed in seeds:
-                        all_rows.extend(
-                            evaluate_once(
-                                data_path=args.data_path,
-                                device=args.device,
-                                dataset=dataset,
-                                method=method,
-                                corruption_type=corruption_type,
-                                severity=severity,
-                                seed=seed,
-                                backbone=args.backbone,
-                            )
+                        job_idx += 1
+                        key = (dataset, method, corruption_type, severity, seed)
+                        if key in completed_keys:
+                            print(f"[Resume] {job_idx}/{total_jobs} skip {key}", flush=True)
+                            continue
+                        progress_path.write_text(
+                            f"job={job_idx}/{total_jobs}\nstate=running\nkey={key}\n",
+                            encoding="utf-8",
+                        )
+                        print(f"[Run] {job_idx}/{total_jobs} {key}", flush=True)
+                        new_rows = evaluate_once(
+                            data_path=args.data_path,
+                            device=args.device,
+                            dataset=dataset,
+                            method=method,
+                            corruption_type=corruption_type,
+                            severity=severity,
+                            seed=seed,
+                            backbone=args.backbone,
+                        )
+                        all_rows.extend(new_rows)
+                        completed_keys.add(key)
+                        pd.DataFrame(all_rows).to_csv(raw_path, index=False)
+                        progress_path.write_text(
+                            f"job={job_idx}/{total_jobs}\nstate=completed\nkey={key}\nrows={len(all_rows)}\n",
+                            encoding="utf-8",
                         )
 
     raw_df = pd.DataFrame(all_rows)
-    raw_path = output_dir / "raw_results.csv"
     raw_df.to_csv(raw_path, index=False)
 
     summary_df = build_summary_table(raw_df)
@@ -182,10 +227,14 @@ def main():
     plot_severity_curves(raw_df, output_dir)
     plot_method_compare(raw_df, output_dir)
 
-    print("Structural corruption experiments completed.")
-    print(f"Raw results: {raw_path}")
-    print(f"Summary table: {summary_path}")
-    print(f"Plots saved to: {output_dir}")
+    progress_path.write_text(
+        f"job={total_jobs}/{total_jobs}\nstate=finished\nrows={len(raw_df)}\n",
+        encoding="utf-8",
+    )
+    print("Structural corruption experiments completed.", flush=True)
+    print(f"Raw results: {raw_path}", flush=True)
+    print(f"Summary table: {summary_path}", flush=True)
+    print(f"Plots saved to: {output_dir}", flush=True)
 
 
 if __name__ == "__main__":

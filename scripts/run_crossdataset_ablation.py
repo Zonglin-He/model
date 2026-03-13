@@ -23,11 +23,15 @@ from scripts.supplementary_utils import (
 
 ABLATION_CONFIGS = {
     "Full_NuSTAR": {},
-    "w/o_semantic_gate": {"sem_thresh": -999.0},
-    "w/o_consistency_gate": {"cons_thresh": 999.0},
-    "w/o_fisher": {"lambda_reg": 0.0, "fisher_alpha": 0.0},
-    "w/o_SSAW": {"adv_sigma": 0.0, "adv_sigmas": [0.0], "enable_piecewise_adv": False},
-    "w/o_all_gates": {"sem_thresh": -999.0, "cons_thresh": 999.0, "entropy_quantile": 1.0},
+    "w/o_semantic_gate": {"enable_semantic_gate": False},
+    "w/o_consistency_gate": {"enable_consistency_gate": False},
+    "w/o_fisher": {"lambda_reg": 0.0, "fisher_alpha": 0.0, "online_fisher": False},
+    "w/o_SSAW": {"enable_ssaw": False, "adv_sigma": 0.0, "adv_sigmas": [0.0], "adv_num_candidates": 0},
+    "w/o_all_gates": {
+        "enable_stat_gate": False,
+        "enable_semantic_gate": False,
+        "enable_consistency_gate": False,
+    },
 }
 DATASETS = ["HAR", "FD"]
 
