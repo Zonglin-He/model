@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import sys
+import ast
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
@@ -28,6 +29,36 @@ from utils.utils import EATAMemory, select_eata_indices
 
 warnings.filterwarnings("ignore", category=sklearn.exceptions.UndefinedMetricWarning)
 parser = argparse.ArgumentParser()
+
+
+def _parse_override_value(raw_value):
+    text = str(raw_value).strip()
+    lowered = text.lower()
+    if lowered == "none":
+        return None
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    try:
+        return ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return text
+
+
+def _parse_cli_overrides(entries):
+    overrides = {}
+    for entry in entries or []:
+        if "=" not in str(entry):
+            raise ValueError(
+                f"Invalid --override value '{entry}'. Expected key=value."
+            )
+        key, raw_value = str(entry).split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid --override value '{entry}'. Empty key.")
+        overrides[key] = _parse_override_value(raw_value)
+    return overrides
 
 
 class TTATrainer(TTAAbstractTrainer):
@@ -93,6 +124,7 @@ class TTATrainer(TTAAbstractTrainer):
             scenario = f"{src_id}_to_{trg_id}"
             cur_scenario_f1_ret = []
             cur_scenario_metrics = []
+            cur_scenario_gate_logs = []
 
             for run_id in range(self.num_runs):
                 self.run_id = run_id
@@ -156,6 +188,9 @@ class TTATrainer(TTAAbstractTrainer):
                 metrics = self.calculate_metrics(tta_model)
                 cur_scenario_metrics.append(metrics)
                 cur_scenario_f1_ret.append(metrics[1])
+                batch_log_summary = getattr(self, "last_batch_log_summary", None)
+                if isinstance(batch_log_summary, dict) and batch_log_summary:
+                    cur_scenario_gate_logs.append(dict(batch_log_summary))
                 table_results = self.append_results_to_tables(
                     table_results, scenario, run_id, metrics[:3], seed=current_seed
                 )
@@ -206,7 +241,7 @@ class TTATrainer(TTAAbstractTrainer):
             )
 
             scenario_key = (str(src_id), str(trg_id))
-            self.scenario_metrics[scenario_key] = {
+            scenario_payload = {
                 "acc_mean": float(avg_metrics[0]),
                 "f1_mean": cur_avg_f1_raw,
                 "auroc_mean": float(avg_metrics[2]),
@@ -216,6 +251,13 @@ class TTATrainer(TTAAbstractTrainer):
                 "auroc_std": float(std_metrics[2]),
                 "trg_risk_std": float(std_metrics[3]),
             }
+            if cur_scenario_gate_logs:
+                gate_df = pd.DataFrame(cur_scenario_gate_logs)
+                scenario_payload["gate_means"] = {
+                    col: float(gate_df[col].mean())
+                    for col in gate_df.columns
+                }
+            self.scenario_metrics[scenario_key] = scenario_payload
 
         table_results = self.add_mean_std_table(table_results, results_columns)
         table_risks = self.add_mean_std_table(table_risks, risks_columns)
@@ -321,6 +363,16 @@ if __name__ == "__main__":
         help="Force pre-training from scratch even if a cache directory is provided.",
     )
     parser.add_argument(
+        '--override',
+        action='append',
+        default=None,
+        help=(
+            "Optional hyperparameter override in key=value form. "
+            "Repeat to override multiple values, e.g. "
+            "--override batch_size=97 --override learning_rate=3e-5."
+        ),
+    )
+    parser.add_argument(
         '--scenario',
         action='append',
         default=None,
@@ -332,6 +384,9 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    override_values = _parse_cli_overrides(args.override)
+    if args.disable_pretrain_cache:
+        args.pretrain_cache_dir = None
 
     def _run_single(seed_args):
         trainer = TTATrainer(seed_args)
@@ -346,6 +401,15 @@ if __name__ == "__main__":
                     raise ValueError(f"Invalid scenario format '{entry}'. Expected 'src->trg'.")
                 selected_pairs.append((str(src), str(trg)))
             trainer.dataset_configs.scenarios = selected_pairs
+        target_pairs = [(str(src), str(trg)) for src, trg in trainer.dataset_configs.scenarios]
+        if override_values:
+            trainer._train_params.update(override_values)
+            trainer.hparams.update(override_values)
+            for src_id, trg_id in target_pairs:
+                existing_override = trainer.get_scenario_override(src_id, trg_id)
+                merged_override = dict(existing_override)
+                merged_override.update(override_values)
+                trainer.store_scenario_override(src_id, trg_id, merged_override)
         trainer.test_time_adaptation()
 
     if args.seeds:

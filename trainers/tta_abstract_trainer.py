@@ -106,6 +106,7 @@ class TTAAbstractTrainer(object):
     def evaluate(self, test_loader, tta_model):
         """Run evaluation and keep cached tensors on CPU to avoid GPU bloat."""
         total_loss, preds_list, labels_list = [], [], []
+        gate_log_rows = []
 
         for data, labels, trg_idx in test_loader:
             if isinstance(data, list):
@@ -119,10 +120,26 @@ class TTAAbstractTrainer(object):
             total_loss.append(loss.item())
             preds_list.append(predictions.detach().cpu())
             labels_list.append(labels.cpu())
+            batch_gate_log = getattr(tta_model, "_last_batch_log", None)
+            if isinstance(batch_gate_log, dict) and batch_gate_log:
+                numeric_row = {}
+                for key, value in batch_gate_log.items():
+                    if isinstance(value, (int, float, np.floating, np.integer)):
+                        numeric_row[key] = float(value)
+                if numeric_row:
+                    gate_log_rows.append(numeric_row)
 
         self.loss = torch.tensor(total_loss, dtype=torch.float32).mean()
         self.full_preds = torch.cat(preds_list)
         self.full_labels = torch.cat(labels_list)
+        if gate_log_rows:
+            gate_df = pd.DataFrame(gate_log_rows)
+            self.last_batch_log_summary = {
+                col: float(gate_df[col].mean())
+                for col in gate_df.columns
+            }
+        else:
+            self.last_batch_log_summary = {}
 
     def get_configs(self): #获取当前数据集对应的配置类实例和超参数类实例
         dataset_class = get_dataset_class(self.dataset)

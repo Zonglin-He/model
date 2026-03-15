@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.interpolate import CubicSpline
 
 from algorithms.base_tta_algorithm import BaseTestTimeAlgorithm
 from utils.utils import safe_torch_load, softmax_entropy_from_logits
@@ -55,16 +54,60 @@ class NuSTAR_ActiveSearch:
         device = k.device
         dtype = k.dtype
         num_candidates, num_ctrl = k.shape
-        ctrl_x = np.linspace(0, target_len - 1, num_ctrl, dtype=np.float32)
-        eval_x = np.linspace(0, target_len - 1, target_len, dtype=np.float32)
-        k_np = k.detach().cpu().numpy().astype(np.float32, copy=False)
-        curves_np = np.empty((num_candidates, target_len), dtype=np.float32)
+        work_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+        y = k.to(dtype=work_dtype)
 
-        for cand_idx in range(num_candidates):
-            spline = CubicSpline(ctrl_x, k_np[cand_idx], bc_type="natural")
-            curves_np[cand_idx] = spline(eval_x).astype(np.float32, copy=False)
+        ctrl_x = torch.linspace(
+            0.0,
+            float(target_len - 1),
+            num_ctrl,
+            device=device,
+            dtype=work_dtype,
+        )
+        h = ctrl_x[1:] - ctrl_x[:-1]
 
-        return torch.from_numpy(curves_np).to(device=device, dtype=dtype)
+        second = torch.zeros(num_candidates, num_ctrl, device=device, dtype=work_dtype)
+        if num_ctrl > 2:
+            rhs = 6.0 * (
+                (y[:, 2:] - y[:, 1:-1]) / h[1:].unsqueeze(0)
+                - (y[:, 1:-1] - y[:, :-2]) / h[:-1].unsqueeze(0)
+            )
+            system = torch.zeros(num_ctrl - 2, num_ctrl - 2, device=device, dtype=work_dtype)
+            diag = 2.0 * (h[:-1] + h[1:])
+            system.diagonal().copy_(diag)
+            if num_ctrl - 3 > 0:
+                system.diagonal(offset=1).copy_(h[1:-1])
+                system.diagonal(offset=-1).copy_(h[1:-1])
+            solution = torch.linalg.solve(system.unsqueeze(0).expand(num_candidates, -1, -1), rhs)
+            second[:, 1:-1] = solution
+
+        eval_x = torch.linspace(
+            0.0,
+            float(target_len - 1),
+            target_len,
+            device=device,
+            dtype=work_dtype,
+        )
+        interval_idx = torch.bucketize(eval_x, ctrl_x[1:-1], right=False)
+        interval_idx = interval_idx.clamp(max=num_ctrl - 2)
+
+        x0 = ctrl_x[interval_idx]
+        x1 = ctrl_x[interval_idx + 1]
+        h_eval = x1 - x0
+        delta0 = x1 - eval_x
+        delta1 = eval_x - x0
+
+        y0 = y[:, interval_idx]
+        y1 = y[:, interval_idx + 1]
+        m0 = second[:, interval_idx]
+        m1 = second[:, interval_idx + 1]
+
+        term0 = m0 * (delta0 ** 3) / (6.0 * h_eval)
+        term1 = m1 * (delta1 ** 3) / (6.0 * h_eval)
+        term2 = (y0 - m0 * (h_eval ** 2) / 6.0) * (delta0 / h_eval)
+        term3 = (y1 - m1 * (h_eval ** 2) / 6.0) * (delta1 / h_eval)
+        curves = term0 + term1 + term2 + term3
+        return curves.to(dtype=dtype)
 
     @staticmethod
     def _extract_features(model, x: torch.Tensor) -> torch.Tensor:

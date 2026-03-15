@@ -153,7 +153,14 @@ def prepare_scenario(trainer, src_id, trg_id, run_seed=42, run_id=0):
     trainer.run_id = run_id
     trainer.set_scenario_hparams(src_id, trg_id)
     trainer._current_scenario = (str(src_id), str(trg_id))
-    trainer.load_data(src_id, trg_id)
+    if hasattr(trainer.dataset_configs, "_active_scenario"):
+        trainer.dataset_configs._active_scenario = trainer._current_scenario
+    else:
+        setattr(trainer.dataset_configs, "_active_scenario", trainer._current_scenario)
+    if trainer.da_method == "NoAdap":
+        trainer.load_data(src_id, trg_id)
+    else:
+        trainer.load_data_demo(src_id, trg_id, int(run_seed))
     trainer.logger, trainer.scenario_log_dir = starting_logs(
         trainer.dataset,
         trainer.da_method,
