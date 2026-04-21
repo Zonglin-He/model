@@ -4,6 +4,7 @@ Dataset/
 results/
 .venv1
 .venv
+.venv311/
 *.pt
 *.pth
 *.ckpt

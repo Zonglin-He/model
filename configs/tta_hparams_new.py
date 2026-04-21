@@ -677,6 +677,37 @@ class FD():
                 'grad_clip': 0.5,
                 'grad_clip_value': None
             },
+            'EATA': {
+                'pre_learning_rate': 3e-4,
+                'learning_rate': 1e-4,
+                'e_margin': 0.43944491546724396,
+                'd_margin': 0.05,
+                'fisher_alpha': 2000.0,
+                'adapt_keywords': ('classifier', 'adapter'),
+                'grad_clip': 0.5,
+                'scenario_overrides': {}
+            },
+            'Tent': {
+                'pre_learning_rate': 3e-4,
+                'learning_rate': 2.5e-4,
+                'grad_clip': 0.5,
+                'grad_clip_value': None,
+                'episodic': False,
+                'scenario_overrides': {}
+            },
+            'SAR': {
+                'pre_learning_rate': 3e-4,
+                'learning_rate': 2.5e-4,
+                'sar_margin_e0': -1.0,
+                'sar_reset_constant_em': 0.2,
+                'sar_rho': 0.05,
+                'sar_adaptive': False,
+                'sar_base_optimizer': 'sgd',
+                'grad_clip': 0.5,
+                'grad_clip_value': None,
+                'episodic': False,
+                'scenario_overrides': {}
+            },
             'NoAdap': {'pre_learning_rate': 5e-4}
         }
 
@@ -719,6 +750,37 @@ class EEG():
 
                 'grad_clip': 0.5,
                 'grad_clip_value': None
+            },
+            'EATA': {
+                'pre_learning_rate': 5e-4,
+                'learning_rate': 3e-4,
+                'e_margin': 0.6437751649736402,
+                'd_margin': 0.05,
+                'fisher_alpha': 2000.0,
+                'adapt_keywords': ('classifier', 'adapter'),
+                'grad_clip': 0.5,
+                'scenario_overrides': {}
+            },
+            'Tent': {
+                'pre_learning_rate': 5e-4,
+                'learning_rate': 2.5e-4,
+                'grad_clip': 0.5,
+                'grad_clip_value': None,
+                'episodic': False,
+                'scenario_overrides': {}
+            },
+            'SAR': {
+                'pre_learning_rate': 5e-4,
+                'learning_rate': 2.5e-4,
+                'sar_margin_e0': -1.0,
+                'sar_reset_constant_em': 0.2,
+                'sar_rho': 0.05,
+                'sar_adaptive': False,
+                'sar_base_optimizer': 'sgd',
+                'grad_clip': 0.5,
+                'grad_clip_value': None,
+                'episodic': False,
+                'scenario_overrides': {}
             },
             'NoAdap': {'pre_learning_rate': 5e-4}
         }
@@ -764,6 +826,38 @@ class HAR():
 
                 'grad_clip': 1.0,
                 'grad_clip_value': 0.5
+            },
+            'EATA': {
+                'pre_learning_rate': 5e-4,
+                'learning_rate': 3e-5,
+                'e_margin': 0.716703787691222,
+                'd_margin': 0.05,
+                'fisher_alpha': 2000.0,
+                'adapt_keywords': ('classifier', 'adapter'),
+                'grad_clip': 1.0,
+                'grad_clip_value': 0.5,
+                'scenario_overrides': {}
+            },
+            'Tent': {
+                'pre_learning_rate': 5e-4,
+                'learning_rate': 2.5e-4,
+                'grad_clip': 1.0,
+                'grad_clip_value': 0.5,
+                'episodic': False,
+                'scenario_overrides': {}
+            },
+            'SAR': {
+                'pre_learning_rate': 5e-4,
+                'learning_rate': 2.5e-4,
+                'sar_margin_e0': -1.0,
+                'sar_reset_constant_em': 0.2,
+                'sar_rho': 0.05,
+                'sar_adaptive': False,
+                'sar_base_optimizer': 'sgd',
+                'grad_clip': 1.0,
+                'grad_clip_value': 0.5,
+                'episodic': False,
+                'scenario_overrides': {}
             },
             'NoAdap': {'pre_learning_rate': 1e-3}
         }
