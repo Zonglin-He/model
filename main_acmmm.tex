@@ -498,7 +498,7 @@ We evaluate NuSTAR on three time-series benchmarks: Sleep-EDF \citep{ragab2022sl
 					\textbf{Method} & \textbf{Sleep-EDF} & \textbf{UCI-HAR} & \textbf{MFD} & \textbf{Avg.} & \textbf{Avg.} \\
 					& \scriptsize{(Noisy EEG)} & \scriptsize{(Heterogeneous)} & \scriptsize{(Fault)} & \textbf{Score} & \textbf{Rank} \\
 					\midrule
-					Source Only & 58.28 & 84.21 & 79.74 & 74.08 & 3.67 \\
+					Source Only & 58.28 & 84.21 & 79.18 & 73.89 & 3.67 \\
 					\midrule
 					TENT \scriptsize{\citep{wang2021tent}}   & 46.64 & \underline{90.45} & 51.91 & 63.00 & 4.67 \\
 					EATA \scriptsize{\citep{niu2022eata}}    & 47.28 & 89.85 & 77.21 & 71.45 & 4.00 \\
@@ -583,6 +583,7 @@ We evaluate NuSTAR on three time-series benchmarks: Sleep-EDF \citep{ragab2022sl
 					\midrule
 					\textbf{Method} & \textbf{0 $\to$ 1} & \textbf{1 $\to$ 2} & \textbf{3 $\to$ 1} & \textbf{1 $\to$ 0} & \textbf{2 $\to$ 3} & \textbf{Avg.} \\
 					\midrule
+					Source Only & 47.05 \scriptsize{$\pm$2.65} & 72.23 \scriptsize{$\pm$3.19} & 99.86 \scriptsize{$\pm$0.09} & 77.39 \scriptsize{$\pm$2.72} & 99.34 \scriptsize{$\pm$0.47} & 79.18 \\
 					TENT  & 44.87 \scriptsize{$\pm$0.00} & 56.36 \scriptsize{$\pm$0.00} & 57.98 \scriptsize{$\pm$0.04} & 45.01 \scriptsize{$\pm$0.27} & 55.31 \scriptsize{$\pm$0.04} & 51.91 \\
 					EATA  & 88.59 \scriptsize{$\pm$0.00} & 65.77 \scriptsize{$\pm$0.00} & 78.37 \scriptsize{$\pm$0.00} & 76.59 \scriptsize{$\pm$0.00} & 76.72 \scriptsize{$\pm$0.00} & 77.21 \\
 					SAR   & 43.56 \scriptsize{$\pm$0.00} & 41.99 \scriptsize{$\pm$0.00} & 43.93 \scriptsize{$\pm$0.00} & 39.98 \scriptsize{$\pm$0.00} & 46.81 \scriptsize{$\pm$0.00} & 43.25 \\

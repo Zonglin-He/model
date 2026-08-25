@@ -1,0 +1,81 @@
+{
+  "protocol": "paper_evidence_v4_logging_split_exact_lazy_seed012",
+  "status": "frozen_for_rerun",
+  "evidence_status": "target_selected_descriptive_not_confirmatory",
+  "production_code_sha256": "1bf2ab908abffcbc5829d3bd8797f9270c983b380e70014bbdcb6f637ed58314",
+  "production_class": "algorithms.dusafe_spline_hard_view.ConfidenceAdmittedSplineResidualKL",
+  "method_contract": {
+    "confidence_admission": true,
+    "source_semantic_router": false,
+    "ssaw": true,
+    "gathered_forward_role": "differentiable_logits_only",
+    "gathered_forward_can_veto": false,
+    "spline_control_points": 10,
+    "spline_num_directions": 4,
+    "spline_signs": 2,
+    "spline_radius_levels": [1.0, 0.5, 0.25],
+    "theoretical_candidate_count": 24,
+    "candidate_search": "exact_lazy_backtracking",
+    "candidate_hash_logging": false
+  },
+  "logging_contract": {
+    "production": {
+      "mode": "production",
+      "scope": ["main_table", "clean_f1_ablation", "efficiency"],
+      "online_decision_equivalence_required": true,
+      "per_sample_evidence_retained": false
+    },
+    "evidence": {
+      "mode": "evidence",
+      "scope": ["safety", "heldout_mechanism", "augmentation_controls"],
+      "online_decision_equivalence_required": true,
+      "per_sample_evidence_retained": true
+    },
+    "validated_equivalence_cell": {
+      "dataset": "HAR",
+      "scenario": "12->16",
+      "source_seed": 1,
+      "stream_seed": 42,
+      "no_ssaw_f1": 0.8104247450828552,
+      "full_f1": 0.8422881364822388,
+      "exact_f1_match": true,
+      "source_checkpoint_match": true
+    }
+  },
+  "datasets": ["EEG", "HAR", "FD", "HHAR"],
+  "formal_flows": {
+    "EEG": ["0->11", "12->5", "7->18", "16->1", "9->14"],
+    "HAR": ["2->11", "6->23", "7->13", "9->18", "12->16"],
+    "FD": ["0->1", "1->2", "3->1", "1->0", "2->3"],
+    "HHAR": ["0->6", "1->6", "2->7", "3->8", "4->5"]
+  },
+  "source_seeds": [0, 1, 2],
+  "stream_seed": 42,
+  "source_profile_json": "results/optuna/flowwise_ssaw_deadline_v3/selected_profiles.json",
+  "source_reference_csv": "results/optuna/flowwise_ssaw_deadline_v3/validation_seeds_0_1_2/paired_raw.csv",
+  "tta_profile_json": "configs/paper_flow_profiles_v1.json",
+  "aggregation": {
+    "cell": "dataset_x_flow_x_source_seed",
+    "flow": "mean_over_source_seeds",
+    "dataset_mean": "mean_over_five_flow_means",
+    "dataset_std": "std_over_source_seed_level_five_flow_means_ddof1"
+  },
+  "online_label_policy": {
+    "target_labels_used_for_online_decision": false,
+    "target_labels_used_for_parameter_selection": true,
+    "confirmatory": false
+  },
+  "safety_protocol": {
+    "scenario": "HAR:12->16",
+    "source_seeds": [0, 1, 2],
+    "stream_seed": 42,
+    "corruption_seed": 314159,
+    "corruption_fraction": 0.5,
+    "physical_protocol": true,
+    "reported_severities": ["s3", "s6"],
+    "corruptions": ["blackout", "signal_freeze"],
+    "variants": ["full", "no_ssaw"],
+    "logging_mode": "evidence"
+  },
+  "incompatible_evidence_policy": "never_merge; retain under its original protocol label only"
+}

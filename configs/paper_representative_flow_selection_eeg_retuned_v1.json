@@ -1,0 +1,20 @@
+{
+  "active_batch_rule": {
+    "metric": "ssaw_admitted_participation_rate",
+    "minimum": 0.25
+  },
+  "future_horizon_batches": 1,
+  "protocol": "paper_representative_flow_selection_v1",
+  "selected_flows": {
+    "EEG": "7->18"
+  },
+  "selection_uses_f1": false,
+  "selection_uses_target_labels": false,
+  "selection_rule": "Among the frozen retuned EEG profiles, select the formal flow with the smallest confidence keep fraction; break ties by larger non-zero SSAW auxiliary weight and then lexicographic scenario.",
+  "selection_inputs": {
+    "confidence_keep_fraction": 0.95,
+    "ssaw_auxiliary_weight": 4.0
+  },
+  "reporting_scope": "descriptive_target_selected_evaluation",
+  "note": "The underlying per-flow profile was target-selected; this representative panel is descriptive, not confirmatory."
+}

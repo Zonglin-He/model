@@ -1,0 +1,27 @@
+{
+  "EEG": {
+    "sampling_rate_hz": 100.0,
+    "sampling_rate_provenance": "EEG protocol metadata: 100 Hz",
+    "bands_hz": {
+      "delta": [1.0, 4.0],
+      "theta": [4.0, 8.0],
+      "alpha": [8.0, 13.0],
+      "beta": [13.0, 30.0],
+      "gamma": [30.0, 45.0]
+    }
+  },
+  "HAR": {
+    "sampling_rate_hz": 50.0,
+    "sampling_rate_provenance": "UCI-HAR protocol metadata: 50 Hz"
+  },
+  "FD": {
+    "sampling_rate_hz": null,
+    "sampling_rate_provenance": "not verified; report normalized sample-axis metrics",
+    "rotation_frequency_hz": null,
+    "rotation_rate_provenance": "not verified; order metric unavailable"
+  },
+  "HHAR": {
+    "sampling_rate_hz": null,
+    "sampling_rate_provenance": "no common verified rate after raw-device window conversion; use cycles/sample"
+  }
+}

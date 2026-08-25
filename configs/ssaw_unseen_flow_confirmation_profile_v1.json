@@ -1,0 +1,31 @@
+{
+  "protocol": "ssaw_unseen_flow_confirmation_profile_v1",
+  "dataset": "HHAR",
+  "calibration_flow": "HHAR:4->5",
+  "evaluation_flows": ["5->0", "6->1", "7->4", "8->3", "0->2"],
+  "source_seeds": [0, 1, 2],
+  "stream_seed": 42,
+  "heldout_direction_bank": "confirmatory_v1",
+  "frozen_before_confirmation": true,
+  "target_labels_used_for_evaluation_flow_selection": false,
+  "target_labels_used_for_runtime_profile_selection_on_evaluation_flows": false,
+  "source_training_overridden": false,
+  "runtime_profile": {
+    "batch_size": 48,
+    "learning_rate": 0.0001,
+    "steps": 1,
+    "ssaw_auxiliary_weight": 1.0,
+    "spline_log_strength": 0.2,
+    "spline_num_directions": 4,
+    "spline_radius_levels": [1.0, 0.5, 0.25]
+  },
+  "preregistered_decision_rule": {
+    "primary_metric": "heldout_stable_radius",
+    "primary_pass": "mean_hard_minus_confidence > 0",
+    "flow_consistency": "at least 3 of 5 flow means > 0",
+    "seed_consistency": "at least 2 of 3 source-seed means > 0",
+    "flip_guardrail": "mean relative heldout flip-rate reduction >= 0.05",
+    "f1_guardrail": "hard_ssaw minus confidence_only future Macro-F1 >= -0.002",
+    "control_guardrail": "hard_ssaw stable radius exceeds both random eligible spline and matched raw duplicate"
+  }
+}

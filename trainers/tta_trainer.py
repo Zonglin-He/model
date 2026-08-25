@@ -9,12 +9,9 @@ PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-ADATIME_PATH = os.path.abspath(os.path.join(PROJECT_ROOT, 'ADATIME'))
-if ADATIME_PATH not in sys.path:
-    sys.path.append(ADATIME_PATH)
-
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 import collections
 import argparse
 import warnings
@@ -25,7 +22,8 @@ import numpy as np
 from utils.utils import fix_randomness, starting_logs, AverageMeter
 from trainers.tta_abstract_trainer import TTAAbstractTrainer
 from optim.optimizer import build_optimizer
-from utils.utils import EATAMemory, select_eata_indices
+from pre_train_model.build import state_dict_to_cpu
+from configs.data_model_configs import validate_scenario
 
 warnings.filterwarnings("ignore", category=sklearn.exceptions.UndefinedMetricWarning)
 parser = argparse.ArgumentParser()
@@ -75,8 +73,12 @@ class TTATrainer(TTAAbstractTrainer):
             self.num_runs = max(int(self.num_runs), len(self._seeds_list))
             self.seed = int(self._seeds_list[0])
         self._current_run_seed = self.seed
+        self.source_seed = int(getattr(args, "source_seed", 1))
+        self._current_source_seed = self.source_seed
+        self.source_confidence_metadata = None
+        self.source_semantic_metadata = None
         fix_randomness(self.seed)
-        self.pretrain_cache_dir = getattr(args, "pretrain_cache_dir", None)
+        self.pretrain_cache_dir = None if getattr(args, "disable_pretrain_cache", False) else getattr(args, "pretrain_cache_dir", None)
         if self.pretrain_cache_dir:
             self.pretrain_cache_dir = os.path.abspath(self.pretrain_cache_dir)
             os.makedirs(self.pretrain_cache_dir, exist_ok=True)
@@ -87,20 +89,10 @@ class TTATrainer(TTAAbstractTrainer):
             self.experiment_description,
             f"{self.run_description}",
         )
-        self.load_pretrained_checkpoint = os.path.join(
-            self.home_path,
-            self.save_dir,
-            self.experiment_description,
-            "NoAdap_All_Trg",
-        )
         os.makedirs(self.exp_log_dir, exist_ok=True)
         self.summary_f1_scores = open(
             os.path.join(self.exp_log_dir, 'summary_f1_scores.txt'), 'w'
         )
-
-        # Initialize EATA memory (length is configurable via hparams)
-        mem_len = int(self.hparams.get('memory_size', 4096)) if hasattr(self, 'hparams') else 4096
-        self.eata_memory = EATAMemory(maxlen=mem_len, device=self.device)
 
     def test_time_adaptation(self):
         """Entry point for running test-time adaptation."""
@@ -133,7 +125,9 @@ class TTATrainer(TTAAbstractTrainer):
                 else:
                     current_seed = self.seed + run_id
                 fix_randomness(current_seed)
-                self._current_run_seed = current_seed
+                self.set_test_time_seed(current_seed)
+                self.set_scenario_hparams(src_id, trg_id)
+                self._current_source_seed = self.source_seed
                 print(f"[Seed] run_id={run_id}, seed={current_seed}")
                 print(run_id)
                 self.logger, self.scenario_log_dir = starting_logs(
@@ -142,23 +136,33 @@ class TTATrainer(TTAAbstractTrainer):
                 self.pre_loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
                 self.loss_avg_meters = collections.defaultdict(lambda: AverageMeter())
 
-                # Refresh memory buffer for each run to avoid cross-scenario leakage
-                mem_len = int(self.hparams.get('memory_size', 4096)) if hasattr(self, 'hparams') else 4096
-                self.eata_memory = EATAMemory(maxlen=mem_len, device=self.device)
-
-                if self.da_method == "NoAdap":
-                    self.load_data(src_id, trg_id)
-                else:
-                    self.load_data_demo(src_id, trg_id, current_seed)
+                self.load_data_demo(
+                    src_id,
+                    trg_id,
+                    current_seed,
+                    source_seed=self._current_source_seed,
+                )
 
                 print('Total test datasize:', len(self.trg_whole_dl.dataset))
-                all_labels = torch.zeros(self.dataset_configs.num_classes)
-                for _, (_, target, _) in enumerate(self.trg_whole_dl):
-                    for idx in range(target.shape[0]):
-                        all_labels[target[idx]] += 1
-                print('trg whole labels:', all_labels)
+                if bool(
+                    self.hparams.get("record_target_label_histogram", False)
+                ):
+                    all_labels = torch.zeros(self.dataset_configs.num_classes)
+                    for _, (_, target, _) in enumerate(self.trg_whole_dl):
+                        all_labels += torch.bincount(
+                            target.to(dtype=torch.long).flatten(),
+                            minlength=self.dataset_configs.num_classes,
+                        ).to(dtype=all_labels.dtype)
+                    print('trg whole labels:', all_labels)
+                else:
+                    print('trg whole labels: disabled (not used by TTA)')
 
+                fix_randomness(self._current_source_seed)
                 non_adapted_model_state, pre_trained_model = self.pre_train()
+                # Source training and online adaptation have independent RNG
+                # streams. Reset here so cache hits and cache misses generate
+                # exactly the same target-time randomness.
+                fix_randomness(current_seed)
                 self.save_checkpoint(self.home_path, self.scenario_log_dir, non_adapted_model_state)
 
                 optimizer = build_optimizer(self.hparams)
@@ -169,22 +173,43 @@ class TTATrainer(TTAAbstractTrainer):
                     tta_model_class = self.get_tta_model_class()
                     tta_model = tta_model_class(self.dataset_configs, self.hparams, pre_trained_model, optimizer)
 
-                    if hasattr(tta_model, "set_eata_memory"):
-                        tta_model.set_eata_memory(self.eata_memory)
-                    else:
-                        tta_model.eata_memory = self.eata_memory
-
-                    tta_model.select_eata_indices = select_eata_indices
-                    # 记录目标集总样本，用于成本统计
-                    try:
-                        tta_model._total_samples = len(self.trg_whole_dl.dataset)
-                        tta_model._selected_counter = 0
-                    except Exception:
-                        pass
-
+                    if hasattr(
+                        tta_model, "load_source_normalization_reference"
+                    ):
+                        normalization_stats = getattr(
+                            self.src_train_dl.dataset,
+                            "normalization_stats",
+                            None,
+                        )
+                        if normalization_stats is None:
+                            raise RuntimeError(
+                                "Physical SSAW requires fixed source "
+                                "normalization stats"
+                            )
+                        tta_model.load_source_normalization_reference(
+                            *normalization_stats
+                        )
+                    if getattr(tta_model, "enable_confidence_gate", False):
+                        if self.source_confidence_metadata is None:
+                            raise RuntimeError(
+                                "DuSafe requires label-free source confidence "
+                                "metadata from the source checkpoint stage"
+                            )
+                        tta_model.load_source_confidence_reference(
+                            self.source_confidence_metadata
+                        )
+                    if getattr(
+                        tta_model, "enable_source_semantic_gate", False
+                    ):
+                        if self.source_semantic_metadata is None:
+                            raise RuntimeError(
+                                "DuSafe requires labelled source semantic "
+                                "metadata from the source checkpoint stage"
+                            )
+                        tta_model.load_source_semantic_reference(
+                            self.source_semantic_metadata
+                        )
                 tta_model.to(self.device)
-                pre_trained_model.eval()
-
                 metrics = self.calculate_metrics(tta_model)
                 cur_scenario_metrics.append(metrics)
                 cur_scenario_f1_ret.append(metrics[1])
@@ -197,21 +222,6 @@ class TTATrainer(TTAAbstractTrainer):
                 table_risks = self.append_results_to_tables(
                     table_risks, scenario, run_id, metrics[-1], seed=current_seed
                 )
-
-                # 输出/保存选样统计（若算法有记录）
-                sel_cnt = getattr(tta_model, "_selected_counter", None)
-                total_cnt = getattr(tta_model, "_total_samples", None)
-                if sel_cnt is not None and total_cnt is not None:
-                    stat_line = (
-                        f"[SelStats] scenario={scenario} seed={current_seed} "
-                        f"selected={sel_cnt}/{total_cnt} ({100.0*sel_cnt/total_cnt:.2f}%)"
-                    )
-                    print(stat_line)
-                    try:
-                        with open(os.path.join(self.scenario_log_dir, "selected_stats.txt"), "a") as f:
-                            f.write(stat_line + "\n")
-                    except Exception:
-                        pass
 
             if cur_scenario_metrics:
                 metrics_array = np.array(cur_scenario_metrics)
@@ -272,22 +282,22 @@ class TTATrainer(TTAAbstractTrainer):
         if not self.pretrain_cache_dir or not self._current_scenario:
             return None
         signature = {
+            "pretrain_protocol_version": 2,
             "dataset": self.dataset,
             "backbone": self.backbone,
             "src": self._current_scenario[0],
+            "source_seed": int(self._current_source_seed),
         }
         pretrain_keys = [
             "pre_learning_rate",
             "num_epochs",
             "batch_size",
             "weight_decay",
-            "step_size",
-            "lr_decay",
             "steps",
             "momentum",
             "optim_method",
         ]
-        signature.update({key: self.hparams.get(key) for key in pretrain_keys if key in self.hparams})
+        signature.update({key: self.source_hparams.get(key) for key in pretrain_keys if key in self.source_hparams})
         backbone_overrides = {
             attr: getattr(self.dataset_configs, attr)
             for attr in getattr(self, "_backbone_attr_names", [])
@@ -298,15 +308,250 @@ class TTATrainer(TTAAbstractTrainer):
         filename = f"{self.dataset}_{self.backbone}_src{self._current_scenario[0]}_{digest}.pt"
         return os.path.join(self.pretrain_cache_dir, filename)
 
+    def _source_confidence_metadata_config(self):
+        dusafe_hparams = self.hparams_class.alg_hparams.get("DuSafe", {})
+        return {
+            "reference_samples": int(
+                dusafe_hparams.get("confidence_reference_samples", 4096)
+            ),
+            "bn_statistics": str(
+                dusafe_hparams.get("bn_statistics", "batch")
+            ).strip().lower(),
+            "disable_dropout": True,
+            # TTBN confidence depends on the batch population.  Calibrate in
+            # the same batch context used by the deployment stream without
+            # coupling this value to source-model training.
+            "source_batch_size": int(
+                self.hparams.get(
+                    "batch_size",
+                    getattr(self.src_test_dl, "batch_size", 1),
+                )
+            ),
+        }
+
+    def _source_confidence_context_key(self):
+        config = self._source_confidence_metadata_config()
+        return json.dumps(config, sort_keys=True, default=str)
+
+    def _source_confidence_metadata_matches(self, metadata):
+        if not isinstance(metadata, dict):
+            return False
+        from algorithms.dusafe import SOURCE_CONFIDENCE_METADATA_VERSION
+
+        config = self._source_confidence_metadata_config()
+        return (
+            int(metadata.get("version", -1))
+            == SOURCE_CONFIDENCE_METADATA_VERSION
+            and int(metadata.get("reference_samples", -1))
+            == config["reference_samples"]
+            and str(metadata.get("bn_statistics", "")).strip().lower()
+            == config["bn_statistics"]
+            and bool(metadata.get("disable_dropout"))
+            == config["disable_dropout"]
+            and int(metadata.get("source_batch_size", -1))
+            == config["source_batch_size"]
+            and torch.as_tensor(metadata.get("top1_nll", [])).numel() > 0
+        )
+
+    def _collect_source_confidence_metadata(self, model):
+        from algorithms.dusafe import collect_source_confidence_metadata
+
+        config = self._source_confidence_metadata_config()
+        source_batch_size = int(config.pop("source_batch_size"))
+        calibration_loader = DataLoader(
+            self.src_test_dl.dataset,
+            batch_size=source_batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=0,
+        )
+        return collect_source_confidence_metadata(
+            calibration_loader,
+            model,
+            **config,
+        )
+
+    def _source_semantic_metadata_config(self):
+        dusafe_hparams = self.hparams_class.alg_hparams.get("DuSafe", {})
+        return {
+            "reference_samples": int(
+                dusafe_hparams.get("source_semantic_reference_samples", 4096)
+            ),
+            "bn_statistics": str(
+                dusafe_hparams.get(
+                    "source_semantic_bn_statistics", "frozen"
+                )
+            ).strip().lower(),
+            "disable_dropout": True,
+            "num_classes": int(self.dataset_configs.num_classes),
+            "source_batch_size": int(
+                self.hparams.get(
+                    "batch_size",
+                    getattr(self.src_test_dl, "batch_size", 1),
+                )
+            ),
+        }
+
+    def _source_semantic_context_key(self):
+        return json.dumps(
+            self._source_semantic_metadata_config(),
+            sort_keys=True,
+            default=str,
+        )
+
+    def _source_semantic_metadata_matches(self, metadata):
+        if not isinstance(metadata, dict):
+            return False
+        from algorithms.dusafe import SOURCE_SEMANTIC_METADATA_VERSION
+
+        config = self._source_semantic_metadata_config()
+        prototypes = torch.as_tensor(metadata.get("prototypes", []))
+        class_counts = torch.as_tensor(metadata.get("class_counts", []))
+        bn_state = metadata.get("feature_extractor_bn_state")
+        return (
+            int(metadata.get("version", -1))
+            == SOURCE_SEMANTIC_METADATA_VERSION
+            and int(metadata.get("reference_samples", -1))
+            == config["reference_samples"]
+            and str(metadata.get("bn_statistics", "")).strip().lower()
+            == config["bn_statistics"]
+            and bool(metadata.get("disable_dropout"))
+            == config["disable_dropout"]
+            and int(metadata.get("source_batch_size", -1))
+            == config["source_batch_size"]
+            and int(metadata.get("num_classes", -1))
+            == config["num_classes"]
+            and prototypes.dim() == 2
+            and prototypes.size(0) == config["num_classes"]
+            and torch.isfinite(prototypes).all().item()
+            and class_counts.numel() == config["num_classes"]
+            and class_counts.gt(0).all().item()
+            and isinstance(bn_state, dict)
+            and int(metadata.get("bn_calibration_samples", 0)) > 0
+        )
+
+    def _collect_source_semantic_metadata(self, model):
+        from algorithms.dusafe import collect_source_semantic_metadata
+
+        config = self._source_semantic_metadata_config()
+        source_batch_size = int(config.pop("source_batch_size"))
+        calibration_loader = DataLoader(
+            self.src_test_dl.dataset,
+            batch_size=source_batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=0,
+        )
+        return collect_source_semantic_metadata(
+            calibration_loader,
+            model,
+            **config,
+        )
+
+    def _requires_source_semantic_metadata(self):
+        """Return whether the selected method explicitly uses old semantics."""
+        if str(getattr(self, "da_method", "")) != "DuSafe":
+            return False
+        hparams = getattr(self, "hparams", {}) or {}
+        return bool(
+            hparams.get("enable_source_semantic_gate", False)
+            or hparams.get("enable_source_semantic_router", False)
+        )
+
     def pre_train(self):
+        requires_semantic = self._requires_source_semantic_metadata()
         cache_path = self._pretrain_cache_path()
         if cache_path and os.path.exists(cache_path):
             print(f"Loading cached pre-training weights from {cache_path}")
             try:
-                payload = torch.load(cache_path, map_location=self.device)
+                # Keep all serialized copies on CPU. Loading both checkpoint
+                # states directly onto CUDA temporarily tripled model memory
+                # before the adapted model was even constructed.
+                payload = torch.load(cache_path, map_location="cpu")
+                if int(payload.get("pretrain_protocol_version", -1)) != 2:
+                    raise ValueError("stale pre-training cache protocol")
+                if int(payload.get("source_seed", -1)) != int(self._current_source_seed):
+                    raise ValueError("pre-training cache source seed mismatch")
                 cached_model = self.initialize_pretrained_model()
                 cached_model.load_state_dict(payload["model_state"])
                 cached_model = cached_model.to(self.device)
+                confidence_context = self._source_confidence_context_key()
+                confidence_by_context = payload.get(
+                    "source_confidence_metadata_by_context", {}
+                )
+                if not isinstance(confidence_by_context, dict):
+                    confidence_by_context = {}
+                confidence_metadata = confidence_by_context.get(
+                    confidence_context
+                )
+                legacy_confidence = payload.get(
+                    "source_confidence_metadata"
+                )
+                if (
+                    not self._source_confidence_metadata_matches(
+                        confidence_metadata
+                    )
+                    and self._source_confidence_metadata_matches(
+                        legacy_confidence
+                    )
+                ):
+                    confidence_metadata = legacy_confidence
+                if not self._source_confidence_metadata_matches(
+                    confidence_metadata
+                ):
+                    print(
+                        "Adding deployment-batch-matched source confidence "
+                        "metadata to the pre-training cache."
+                    )
+                    confidence_metadata = (
+                        self._collect_source_confidence_metadata(cached_model)
+                    )
+                confidence_by_context[confidence_context] = (
+                    confidence_metadata
+                )
+                payload["source_confidence_metadata_by_context"] = (
+                    confidence_by_context
+                )
+                # Keep the active context at the legacy key for explicit
+                # checkpoint consumers while the map prevents cache thrash.
+                payload["source_confidence_metadata"] = confidence_metadata
+                self.source_confidence_metadata = confidence_metadata
+
+                if requires_semantic:
+                    semantic_context = self._source_semantic_context_key()
+                    semantic_by_context = payload.get(
+                        "source_semantic_metadata_by_context", {}
+                    )
+                    if not isinstance(semantic_by_context, dict):
+                        semantic_by_context = {}
+                    semantic_metadata = semantic_by_context.get(semantic_context)
+                    legacy_semantic = payload.get("source_semantic_metadata")
+                    if (
+                        not self._source_semantic_metadata_matches(
+                            semantic_metadata
+                        )
+                        and self._source_semantic_metadata_matches(legacy_semantic)
+                    ):
+                        semantic_metadata = legacy_semantic
+                    if not self._source_semantic_metadata_matches(
+                        semantic_metadata
+                    ):
+                        print(
+                            "Adding source-BN-frozen semantic "
+                            "metadata to the pre-training cache."
+                        )
+                        semantic_metadata = self._collect_source_semantic_metadata(
+                            cached_model
+                        )
+                    semantic_by_context[semantic_context] = semantic_metadata
+                    payload["source_semantic_metadata_by_context"] = (
+                        semantic_by_context
+                    )
+                    payload["source_semantic_metadata"] = semantic_metadata
+                    self.source_semantic_metadata = semantic_metadata
+                else:
+                    self.source_semantic_metadata = None
+                torch.save(payload, cache_path)
                 return payload["non_adapted"], cached_model
             except Exception as exc:
                 print(f"Failed to load cache ({exc}); re-training from scratch and refreshing cache.")
@@ -316,15 +561,42 @@ class TTATrainer(TTAAbstractTrainer):
                     pass
 
         non_adapted_model_state, pre_trained_model = super(TTATrainer, self).pre_train()
-
+        self.source_confidence_metadata = (
+            self._collect_source_confidence_metadata(pre_trained_model)
+        )
+        self.source_semantic_metadata = (
+            self._collect_source_semantic_metadata(pre_trained_model)
+            if requires_semantic
+            else None
+        )
         if cache_path:
-            torch.save(
-                {
-                    "non_adapted": non_adapted_model_state,
-                    "model_state": pre_trained_model.state_dict(),
+            payload = {
+                "pretrain_protocol_version": 2,
+                "source_seed": int(self._current_source_seed),
+                "source_hparams": dict(self.source_hparams),
+                "non_adapted": non_adapted_model_state,
+                "model_state": state_dict_to_cpu(pre_trained_model),
+                "source_confidence_metadata": self.source_confidence_metadata,
+                "source_confidence_metadata_by_context": {
+                    self._source_confidence_context_key(): (
+                        self.source_confidence_metadata
+                    )
                 },
-                cache_path,
-            )
+            }
+            if requires_semantic:
+                payload.update(
+                    {
+                        "source_semantic_metadata": (
+                            self.source_semantic_metadata
+                        ),
+                        "source_semantic_metadata_by_context": {
+                            self._source_semantic_context_key(): (
+                                self.source_semantic_metadata
+                            )
+                        },
+                    }
+                )
+            torch.save(payload, cache_path)
             print(f"Cached pre-training weights at {cache_path}")
 
         return non_adapted_model_state, pre_trained_model
@@ -335,21 +607,31 @@ if __name__ == "__main__":
     parser.add_argument('--save_dir', default='results/tta_experiments_logs', type=str, help='Directory containing all experiments')
     parser.add_argument('--exp_name', default='All_Trg', type=str, help='experiment name')
     # ========= Select the DA methods ============
-    parser.add_argument('--da_method', default='ACCUP', type=str, help='ACCUP, NoAdap')
+    parser.add_argument('--da_method', default='DuSafe', choices=('DuSafe', 'NoAdap'))
     # ========= Select the DATASET ==============
-    parser.add_argument('--data-path', default=r'D:\PyCharm Project\ACCUP + EATA\data\Dataset', type=str)
-    parser.add_argument('--dataset', default='EEG', type=str, help='Dataset of choice: (WISDM - EEG - HAR - HHAR_SA)')
+    parser.add_argument('--data-path', default='data/Dataset', type=str)
+    parser.add_argument('--dataset', default='EEG', choices=('EEG', 'HAR', 'FD', 'HHAR'))
     # ========= Select the BACKBONE ==============
-    parser.add_argument('--backbone', default='CNN', type=str, help='Backbone of choice: (CNN - RESNET18 - TCN)')
+    parser.add_argument('--backbone', default='CNN', choices=('CNN', 'TimesNet'))
     # ========= Experiment settings ===============
     parser.add_argument('--num_runs', default=1, type=int, help='Number of consecutive run with different seeds')
     parser.add_argument('--device', default="cuda", type=str, help='cpu or cuda')
     parser.add_argument('--seed', default=42, type=int, help='Random seed applied to every run in this invocation')
     parser.add_argument(
+        '--source_seed',
+        default=1,
+        type=int,
+        help='Independent source-training seed; shared across methods for paired comparisons.',
+    )
+    parser.add_argument(
         '--seeds',
         type=str,
         default=None,
-        help="Comma-separated seeds to run sequentially (e.g., '41,42,43'). Overrides --seed when provided.",
+        help=(
+            "Comma-separated target-time control seeds (e.g., '42'). "
+            "Independent source checkpoints use --source_seed; fixed target "
+            "loaders are not reshuffled by repeating this option."
+        ),
     )
     parser.add_argument(
         '--pretrain_cache_dir',
@@ -399,17 +681,10 @@ if __name__ == "__main__":
                     src, trg = entry.split(',', 1)
                 else:
                     raise ValueError(f"Invalid scenario format '{entry}'. Expected 'src->trg'.")
-                selected_pairs.append((str(src), str(trg)))
+                selected_pairs.append(validate_scenario(seed_args.dataset, src, trg))
             trainer.dataset_configs.scenarios = selected_pairs
-        target_pairs = [(str(src), str(trg)) for src, trg in trainer.dataset_configs.scenarios]
         if override_values:
-            trainer._train_params.update(override_values)
-            trainer.hparams.update(override_values)
-            for src_id, trg_id in target_pairs:
-                existing_override = trainer.get_scenario_override(src_id, trg_id)
-                merged_override = dict(existing_override)
-                merged_override.update(override_values)
-                trainer.store_scenario_override(src_id, trg_id, merged_override)
+            trainer.set_runtime_hparams(override_values)
         trainer.test_time_adaptation()
 
     if args.seeds:

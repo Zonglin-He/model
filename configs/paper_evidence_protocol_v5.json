@@ -1,0 +1,245 @@
+{
+  "protocol": "paper_evidence_v5_exact_efficiency_logging_split_seed012",
+  "status": "frozen_for_cpu_finalization",
+  "evidence_status": "target_selected_descriptive_not_confirmatory",
+  "production_code_sha256": "dynamic_at_finalization",
+  "ablation_code_sha256": "dynamic_at_finalization",
+  "ablation_code_files": [
+    "algorithms/representative_causal_ablation.py",
+    "algorithms/dusafe_replacement_ablation.py",
+    "algorithms/dusafe_augmentation_controls.py",
+    "algorithms/dusafe_direct_ablation.py",
+    "algorithms/dusafe_two_factor_ablation.py",
+    "scripts/run_dusafe_replacement_ablation.py"
+  ],
+  "ablation_code_scopes": {
+    "core": {
+      "dependency_files": [
+        "algorithms/representative_causal_ablation.py",
+        "algorithms/dusafe_replacement_ablation.py",
+        "scripts/run_dusafe_replacement_ablation.py"
+      ],
+      "current_scoped_sha256": "237c51608e3cfe35d303376870cdefa6d64b25276cb81bc2a922b5e388d84bef",
+      "accepted_legacy_broad_sha256": "147f0837c40c77c9a9c0fea1d880b2c04be8e58be0db2f4f429da9e890144d99",
+      "required_random_selection_mode": "random_label_preserving_candidate"
+    },
+    "augmentation_controls": {
+      "dependency_files": [
+        "algorithms/representative_causal_ablation.py",
+        "algorithms/dusafe_replacement_ablation.py",
+        "algorithms/dusafe_augmentation_controls.py",
+        "scripts/run_dusafe_replacement_ablation.py"
+      ],
+      "current_scoped_sha256": "70e56f8a006db9cf91aac6b26ccf7fbaabd7346b2e1a2bf8bce0bfe0d5b689e8",
+      "accepted_legacy_broad_sha256": "147f0837c40c77c9a9c0fea1d880b2c04be8e58be0db2f4f429da9e890144d99"
+    }
+  },
+  "production_class": "algorithms.dusafe_spline_hard_view.ConfidenceAdmittedSplineResidualKL",
+  "datasets": ["EEG", "HAR", "FD", "HHAR"],
+  "formal_flows": {
+    "EEG": ["0->11", "12->5", "7->18", "16->1", "9->14"],
+    "HAR": ["2->11", "6->23", "7->13", "9->18", "12->16"],
+    "FD": ["0->1", "1->2", "3->1", "1->0", "2->3"],
+    "HHAR": ["0->6", "1->6", "2->7", "3->8", "4->5"]
+  },
+  "core_datasets": ["HAR", "HHAR"],
+  "source_seeds": [0, 1, 2],
+  "stream_seed": 42,
+  "source_cache_roots": {
+    "EEG": "results/pretrain_cache/optuna_stepwise",
+    "HAR": "results/pretrain_cache/optuna_stepwise",
+    "FD": "results/pretrain_cache/optuna_stepwise",
+    "HHAR": "results/pretrain_cache/hhar_formal"
+  },
+  "source_profile_json": "results/optuna/flowwise_ssaw_deadline_v3/selected_profiles.json",
+  "source_reference_csv": "results/optuna/flowwise_ssaw_deadline_v3/validation_seeds_0_1_2/paired_raw.csv",
+  "tta_profile_json": "configs/paper_flow_profiles_v1.json",
+  "source_identity": {
+    "required_model_sha256": true,
+    "required_checkpoint_path": true,
+    "required_metadata_context_sha256": true,
+    "metadata_context_definition": "sha256(canonical JSON {source_model_sha256, deployment_batch_size, confidence_keep_fraction, stream_seed})",
+    "pair_variants_share_model_and_context": true
+  },
+  "logging_contract": {
+    "main": {"mode": "production", "graph": "not_required"},
+    "core": {"mode": "production", "graph": "not_required"},
+    "safety": {"mode": "evidence", "graph": "disabled"}
+  },
+  "counts": {
+    "main_cells": 120,
+    "main_paired_units": 60,
+    "core_cells": 120,
+    "core_paired_units": 30,
+    "safety_jobs": 24,
+    "efficiency_rows": 12
+  },
+  "mechanism_panels": {
+    "heldout_hhar": {
+      "root": "results/paper_evidence_v5/claim_preservation_v2_heldout_hhar_4_to_5",
+      "old_v4_root": "results/paper_evidence_v4/heldout_selection_hhar_4_to_5",
+      "dataset": "HHAR",
+      "flows": ["4->5"],
+      "source_cells": 3,
+      "raw_rows": 150,
+      "variants": ["accept_all_raw", "confidence_only", "matched_raw_duplicate", "random_eligible_spline", "hard_ssaw"],
+      "logging_mode": "evidence",
+      "graph": "disabled",
+      "metric": "future_macro_f1"
+      ,"ablation_code_required": true
+      ,"causal_evidence_code_required": true
+      ,"source_identity_reference": "paper_table_golden_cell"
+      ,"source_cache_root": "results/pretrain_cache/optuna_stepwise"
+      ,"paper_source_checkpoints": {
+        "0": {"source_model_sha256": "70e4bc57fb8e020348f6d9b82a8d28095990df4625bbb074c8520c0185fe5d2e", "source_checkpoint_path": "results/pretrain_cache/optuna_stepwise/HHAR_CNN_src4_72a8c83c2231fc005c216b972992cf86.pt"},
+        "1": {"source_model_sha256": "74de21421217fd560b1f4dee92f15ce7a8909f7a5bf21d39f7438b3f693a5402", "source_checkpoint_path": "results/pretrain_cache/optuna_stepwise/HHAR_CNN_src4_24e42a02c54e295385291b4839de04e7.pt"},
+        "2": {"source_model_sha256": "b1af9cd9c8385884a3fb06d6ec76dcfaac0f3ee76b65f3fe9ca499eb1848ec93", "source_checkpoint_path": "results/pretrain_cache/optuna_stepwise/HHAR_CNN_src4_3f9ea499ed24f801a046ce344b462c26.pt"}
+      }
+    },
+    "confidence_eeg": {
+      "root": "results/paper_evidence_v5/claim_preservation_v2_confidence_eeg_7_to_18",
+      "old_v4_root": "results/paper_evidence_v4/confidence_eeg_7_to_18",
+      "dataset": "EEG",
+      "flows": ["7->18"],
+      "source_cells": 6,
+      "raw_rows": 60,
+      "conditions": ["clean", "signal_freeze:moderate"],
+      "variants": ["accept_all_raw", "confidence_only", "matched_raw_duplicate", "random_eligible_spline", "hard_ssaw"],
+      "logging_mode": "evidence",
+      "graph": "disabled",
+      "metric": "future_macro_f1"
+      ,"ablation_code_required": true
+      ,"causal_evidence_code_required": true
+      ,"source_identity_reference": "paper_table_golden_cell"
+      ,"source_cache_root": "results/pretrain_cache/optuna_stepwise"
+      ,"paper_source_checkpoints": {
+        "0": {"source_model_sha256": "17fb1c5367ed007fca8d7a66705dacb14e93f5d876842013608099a7df1d53b5", "source_checkpoint_path": "results/pretrain_cache/optuna_stepwise/EEG_CNN_src7_5c01de09d5bbe5fe5fd86279e444581b.pt"},
+        "1": {"source_model_sha256": "fc5b0093c36dbd454d823a045ee5881289577148baafbe954395e45aae6fff3e", "source_checkpoint_path": "results/pretrain_cache/optuna_stepwise/EEG_CNN_src7_6baaa4b48be8070324c5cb637c881481.pt"},
+        "2": {"source_model_sha256": "ea7b1196f3bf366fa40d33f4bf7bbd922cfde9b240086b593ee64c6d2dc5d954", "source_checkpoint_path": "results/pretrain_cache/optuna_stepwise/EEG_CNN_src7_a579e582ee74178fde259e6f3db4b00b.pt"}
+      }
+    },
+    "augmentation_controls": {
+      "root": "results/paper_evidence_v5/augmentation_controls_har_hhar",
+      "old_v4_root": "results/paper_evidence_v4/augmentation_controls_har_hhar",
+      "datasets": ["HAR", "HHAR"],
+      "flows_per_dataset": 5,
+      "raw_rows": 180,
+      "runners": ["confidence_only", "random_eligible_spline", "hard_gaussian_jitter", "hard_scaling", "hard_time_warp", "hard_ssaw"],
+      "logging_mode": "evidence",
+      "graph": "disabled",
+      "metric": "f1"
+      ,"ablation_code_required": true
+    }
+  },
+  "paper_table_golden_reference": {
+    "contract": "paper_table_claim_preservation_v1",
+    "required": true,
+    "comparison": "cellwise_exact_table_metrics_and_semantic_provenance",
+    "historical_execution_comparisons_are_not_paper_table_references": true,
+    "panels": {
+      "heldout_hhar": {
+        "golden_root": "results/paper_evidence_v4/regression_old_mechanism_optimized_matched",
+        "golden_manifest_sha256": "1a674629ce92b09ee1466c605a39b06c677c7522436810922c360e78dc01e827",
+        "golden_raw_sha256": "5cf029e313306183e4e31d366a40cf87f0a5179c312e246e1ac057c9708ec540",
+        "key_columns": ["dataset", "scenario", "source_seed", "stream_seed", "variant", "condition", "batch_index", "horizon"],
+        "paper_variants": ["confidence_only", "random_eligible_spline", "hard_ssaw"],
+        "paper_table_fields": ["future_macro_f1", "heldout_flip_rate", "heldout_consistency", "heldout_worst_margin", "ssaw_training_participation_rate"],
+        "semantic_provenance_fields": [
+          "source_model_sha256", "expected_source_model_sha256",
+          "target_labels_used_for_online_updates", "target_labels_used_for_parameter_selection",
+          "parameter_selection_data_overlap", "evaluation_partition", "confirmatory",
+          "evaluation_role", "target_labels_used_for_metrics", "heldout_bank_tag",
+          "future_samples", "pre_batch_model_buffer_hash", "pre_batch_optimizer_hash",
+          "shared_reference_variant", "joint_causal_start_state", "future_eval_untouched",
+          "future_eval_rng_untouched", "admission_mask_sha256", "candidate_pool_sha256",
+          "heldout_candidate_pool_sha256", "heldout_candidate_count", "heldout_sobol_seed"
+        ],
+        "manifest_provenance_fields": [
+          "protocol", "status", "heldout_bank_tag", "input_cells", "raw_rows",
+          "same_batch_start_state_required", "target_labels_used_for_online_updates",
+          "target_labels_used_for_parameter_selection", "parameter_selection_data_overlap",
+          "confirmatory", "evaluation_role", "active_batch_threshold",
+          "candidate_pool_and_denominator_shared_required", "evidence_roles"
+        ],
+        "profile_fields": {
+          "batch_size": 48,
+          "learning_rate": 0.0001,
+          "spline_log_strength": 0.2,
+          "ssaw_auxiliary_weight": 1.0,
+          "steps": 1,
+          "dusafe_logging_mode": "evidence",
+          "record_ssaw_candidate_hash": true
+        },
+        "excluded_opaque_state_hashes": {
+          "columns": ["pre_batch_state_hash", "post_update_state_hash"],
+          "reason": "these hashes include implementation/runtime evidence buffers; model-buffer and optimizer hashes are compared instead"
+        }
+      },
+      "confidence_eeg": {
+        "golden_root": "results/paper_evidence_v4/regression_old_confidence_optimized",
+        "golden_manifest_sha256": "41c545eff7e288aee2770a57ad4ed5b55687aa7f195058c0c0dea6e2723c4ffa",
+        "golden_raw_sha256": "44f13b653b6dfb369248ae1998b47c0c732f583df7ad0c1801486923bdc59cb7",
+        "key_columns": ["dataset", "scenario", "source_seed", "stream_seed", "variant", "condition", "batch_index", "horizon"],
+        "paper_variants": ["accept_all_raw", "confidence_only"],
+        "paper_table_fields": ["future_macro_f1", "coverage", "admitted_accuracy"],
+        "semantic_provenance_fields": [
+          "source_model_sha256", "expected_source_model_sha256",
+          "target_labels_used_for_online_updates", "target_labels_used_for_parameter_selection",
+          "parameter_selection_data_overlap", "evaluation_partition", "confirmatory",
+          "evaluation_role", "target_labels_used_for_metrics", "heldout_bank_tag",
+          "future_samples", "pre_batch_model_buffer_hash", "pre_batch_optimizer_hash",
+          "shared_reference_variant", "joint_causal_start_state", "future_eval_untouched",
+          "future_eval_rng_untouched", "admission_mask_sha256", "candidate_pool_sha256",
+          "heldout_candidate_pool_sha256", "heldout_candidate_count", "heldout_sobol_seed"
+        ],
+        "manifest_provenance_fields": [
+          "protocol", "status", "heldout_bank_tag", "input_cells", "raw_rows",
+          "same_batch_start_state_required", "target_labels_used_for_online_updates",
+          "target_labels_used_for_parameter_selection", "parameter_selection_data_overlap",
+          "confirmatory", "evaluation_role", "active_batch_threshold",
+          "candidate_pool_and_denominator_shared_required", "evidence_roles"
+        ],
+        "profile_fields": {
+          "batch_size": 192,
+          "confidence_keep_fraction": 0.95,
+          "grad_clip": 0.01,
+          "learning_rate": 0.0001,
+          "spline_log_strength": 0.2,
+          "ssaw_auxiliary_weight": 4.0,
+          "steps": 1,
+          "dusafe_logging_mode": "evidence",
+          "record_ssaw_candidate_hash": true
+        },
+        "excluded_opaque_state_hashes": {
+          "columns": ["pre_batch_state_hash", "post_update_state_hash"],
+          "reason": "these hashes include implementation/runtime evidence buffers; model-buffer and optimizer hashes are compared instead"
+        }
+      }
+    }
+  },
+  "safety": {
+    "dataset": "HAR",
+    "scenario": "12->16",
+    "source_seeds": [0, 1, 2],
+    "stream_seed": 42,
+    "corruption_seed": 314159,
+    "corruptions": ["blackout", "signal_freeze"],
+    "severities": ["s3", "s6"],
+    "variants": ["full", "no_ssaw"]
+  },
+  "efficiency": {
+    "root": "results/efficiency_optimization_v5/formal_all_baselines_har_12to16_v4",
+    "protocol": "compute_overhead_formal_v4",
+    "methods": ["NoAdap", "Tent", "EATA", "SAR", "ACCUPOfficial", "CoTTA", "SoTTA", "RoTTA", "COME", "NOTE", "DuSafe"],
+    "dusafe_variants": ["full", "no_ssaw"],
+    "rows": 12,
+    "rerun": false
+  },
+  "online_label_policy": {
+    "target_labels_used_for_online_decision": false,
+    "target_labels_used_for_parameter_selection": true,
+    "target_selected_descriptive": true,
+    "confirmatory": false
+  },
+  "incompatible_evidence_policy": "never_merge; retain historical artifacts under their original protocol label"
+}

@@ -1,0 +1,11 @@
+{
+  "EEG:7->18": {
+    "source_config": {
+      "pre_learning_rate": 0.0005,
+      "normalization_reference": "source",
+      "num_epochs": 320,
+      "batch_size": 96,
+      "weight_decay": 1e-07
+    }
+  }
+}
