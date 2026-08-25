@@ -1,0 +1,33 @@
+{
+  "protocol": "paper_flow_profiles_v1_target_selected_descriptive",
+  "selection_seed": 1,
+  "stream_seed": 42,
+  "source_training_overridden": false,
+  "target_labels_used_for_tta_profile_selection": true,
+  "ssaw_weight_strictly_positive": true,
+  "profiles": {
+    "EEG:0->11": {"batch_size": 192, "learning_rate": 0.00075, "steps": 1, "ssaw_auxiliary_weight": 0.1},
+    "EEG:12->5": {"batch_size": 192, "learning_rate": 0.00075, "steps": 1, "ssaw_auxiliary_weight": 0.1},
+    "EEG:16->1": {"batch_size": 192, "learning_rate": 0.00075, "steps": 1, "ssaw_auxiliary_weight": 0.1},
+    "EEG:7->18": {"batch_size": 192, "learning_rate": 0.00075, "steps": 1, "ssaw_auxiliary_weight": 0.1},
+    "EEG:9->14": {"batch_size": 192, "learning_rate": 0.00075, "steps": 1, "ssaw_auxiliary_weight": 0.1},
+
+    "HAR:2->11": {"batch_size": 48, "learning_rate": 0.0003325, "steps": 2, "ssaw_auxiliary_weight": 0.1},
+    "HAR:6->23": {"batch_size": 48, "learning_rate": 0.001, "steps": 2, "ssaw_auxiliary_weight": 0.1},
+    "HAR:7->13": {"batch_size": 48, "learning_rate": 0.0003325, "steps": 2, "ssaw_auxiliary_weight": 0.1},
+    "HAR:9->18": {"batch_size": 48, "learning_rate": 0.001, "steps": 2, "ssaw_auxiliary_weight": 4.0},
+    "HAR:12->16": {"batch_size": 48, "learning_rate": 0.001, "steps": 2, "ssaw_auxiliary_weight": 4.0},
+
+    "FD:0->1": {"batch_size": 192, "learning_rate": 0.000003, "steps": 2, "ssaw_auxiliary_weight": 0.05},
+    "FD:1->0": {"batch_size": 192, "learning_rate": 0.000003, "steps": 2, "ssaw_auxiliary_weight": 0.05},
+    "FD:1->2": {"batch_size": 192, "learning_rate": 0.000003, "steps": 2, "ssaw_auxiliary_weight": 0.05},
+    "FD:2->3": {"batch_size": 192, "learning_rate": 0.000003, "steps": 2, "ssaw_auxiliary_weight": 0.05},
+    "FD:3->1": {"batch_size": 192, "learning_rate": 0.000003, "steps": 2, "ssaw_auxiliary_weight": 0.05},
+
+    "HHAR:0->6": {"batch_size": 48, "learning_rate": 0.0001, "steps": 1, "ssaw_auxiliary_weight": 0.1},
+    "HHAR:1->6": {"batch_size": 48, "learning_rate": 0.0001, "steps": 1, "ssaw_auxiliary_weight": 1.0},
+    "HHAR:2->7": {"batch_size": 16, "learning_rate": 0.0001, "steps": 2, "ssaw_auxiliary_weight": 0.25},
+    "HHAR:3->8": {"batch_size": 48, "learning_rate": 0.0001, "steps": 1, "ssaw_auxiliary_weight": 1.0},
+    "HHAR:4->5": {"batch_size": 48, "learning_rate": 0.0001, "steps": 1, "ssaw_auxiliary_weight": 1.0}
+  }
+}

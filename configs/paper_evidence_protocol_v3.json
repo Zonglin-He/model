@@ -1,0 +1,58 @@
+{
+  "protocol": "paper_evidence_v3_canonical_current_dusafe_seed012",
+  "status": "frozen_for_rerun",
+  "evidence_status": "target_selected_descriptive_not_confirmatory",
+  "production_code_sha256": "ed87901551f26f7ab5f9c456342463ff24a6f589cc01f571d775600871adf6ac",
+  "production_class": "algorithms.dusafe_spline_hard_view.ConfidenceAdmittedSplineResidualKL",
+  "method_contract": {
+    "confidence_admission": true,
+    "source_semantic_router": false,
+    "ssaw": true,
+    "gathered_forward_role": "differentiable_logits_and_diagnostics_only",
+    "gathered_forward_can_veto": false,
+    "spline_control_points": 10,
+    "spline_num_directions": 4,
+    "spline_signs": 2,
+    "spline_radius_levels": [1.0, 0.5, 0.25],
+    "candidate_count": 24
+  },
+  "datasets": ["EEG", "HAR", "FD", "HHAR"],
+  "formal_flows": {
+    "EEG": ["0->11", "12->5", "7->18", "16->1", "9->14"],
+    "HAR": ["2->11", "6->23", "7->13", "9->18", "12->16"],
+    "FD": ["0->1", "1->2", "3->1", "1->0", "2->3"],
+    "HHAR": ["0->6", "1->6", "2->7", "3->8", "4->5"]
+  },
+  "source_seeds": [0, 1, 2],
+  "stream_seed": 42,
+  "source_profile_json": "results/optuna/flowwise_ssaw_deadline_v3/selected_profiles.json",
+  "source_reference_csv": "results/optuna/flowwise_ssaw_deadline_v3/validation_seeds_0_1_2/paired_raw.csv",
+  "tta_profile_json": "configs/paper_flow_profiles_v1.json",
+  "aggregation": {
+    "cell": "dataset_x_flow_x_source_seed",
+    "flow": "mean_over_source_seeds",
+    "dataset_mean": "mean_over_five_flow_means",
+    "dataset_std": "std_over_source_seed_level_five_flow_means_ddof1"
+  },
+  "online_label_policy": {
+    "target_labels_used_for_online_decision": false,
+    "target_labels_used_for_parameter_selection": true,
+    "confirmatory": false
+  },
+  "safety_protocol": {
+    "scenario": "HAR:12->16",
+    "source_seeds": [0, 1, 2],
+    "stream_seed": 42,
+    "corruption_seed": 314159,
+    "corruption_fraction": 0.5,
+    "physical_protocol": true,
+    "severity_policy": "pre_registered_s0_to_s6_normalized_with_physical_parameters",
+    "reported_severities": {
+      "moderate": "s3",
+      "severe": "s6"
+    },
+    "corruptions": ["blackout", "signal_freeze"],
+    "variants": ["full", "no_ssaw"]
+  },
+  "incompatible_evidence_policy": "never_merge; retain under its original protocol label only"
+}

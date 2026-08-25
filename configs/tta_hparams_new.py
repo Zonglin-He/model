@@ -1,863 +1,230 @@
-import math
+"""Repository defaults for fixed-source DuSafe experiments.
+
+These values are the dataset-level fallback.  Registered paper experiments
+may overlay TTA-only per-flow values from ``paper_flow_profiles_v2.json``;
+source-training settings remain tied to the fixed source checkpoint.
+"""
+
+from copy import deepcopy
 
 
-def scenario(src_id, trg_id):
-    """Normalize场景ID为字符串元组，避免'几to几'写错或类型不一致。"""
-    return str(src_id), str(trg_id)
+def get_hparams_class(dataset_name):
+    try:
+        return globals()[dataset_name]
+    except KeyError as exc:
+        raise NotImplementedError(f"Dataset not found: {dataset_name}") from exc
 
-def backbone_scenario(backbone, src_id, trg_id):
-    """Helper to tag overrides with a specific backbone while keeping keys hashable."""
-    return str(backbone), str(src_id), str(trg_id)
 
-NUSTAR_DEFAULTS_HAR = {
-    "adv_sigma": 0.1,
-    "adv_ctrl_points": 10,
-    "adv_num_candidates": 16,
-    "sem_thresh": 0.5,
-    "cons_thresh": 0.5,
-    "stat_quantile": 0.7,
-    "stat_window": 512,
-    "stat_min_history": 32,
-    "stat_min_entropy": 0.0,
-    "proto_momentum": 0.9,
+_COMMON_DUSAFE = {
+    "optim_method": "adam",
+    # Every dataset uses the same sampled-spline residual-KL algorithm. The
+    # paired no-SSAW runner selects ``confidence_raw`` at runtime.
+    "dusafe_variant": "spline_residual",
+    "enable_adaptation": True,
+    # Execution-only optimizations. ``fused`` reuses the differentiable
+    # raw/view forwards for detached gates and diagnostics; it does not change
+    # the objective. A single rollback snapshot covers all finite inner steps
+    # of one deployment batch. Expensive per-parameter clip statistics remain
+    # available for audits but are disabled in production timing.
+    "dusafe_execution_mode": "fused",
+    # Main-table/deployment runs keep only online masks and compact scalars.
+    # Safety, mechanism, and replay runners explicitly override this to
+    # ``evidence`` when they require per-sample or per-inner-step diagnostics.
+    "dusafe_logging_mode": "production",
+    # Main-table/deployment runs do not materialize target-label-dependent
+    # per-sample safety rows. Evidence runners explicitly enable them.
+    "record_per_sample_evidence": False,
+    # Compact online masks remain available as an opt-in monitoring profile.
+    # F1-only production and overhead runs avoid their device-to-host transfer.
+    "record_production_batch_diagnostics": False,
+    # Runtime profiler ranges are enabled transiently by the overhead
+    # profiler, but omitted from ordinary production timing.
+    "record_runtime_stage_markers": False,
+    # Production may cache the eight mandatory largest-radius candidate
+    # forwards as one sequential CUDA Graph. Each candidate remains its own
+    # [B,C,T] BatchNorm batch. ``auto`` requires bitwise eager/graph checks and
+    # keeps the graph only when a setup-time timing probe shows >=5% speedup.
+    # Evidence runs always use the historical eager path.
+    "ssaw_candidate_cuda_graph": "auto",
+    # Capture plus the mandatory post-update exact self-test amortizes only on
+    # streams with roughly ten or more full-shape candidate searches.
+    "ssaw_candidate_cuda_graph_min_expected_searches": 10,
+    # Very large level-zero tensors are bandwidth/compute bound rather than
+    # launch bound; capturing them adds setup time and persistent graph memory.
+    "ssaw_candidate_cuda_graph_max_static_input_mb": 24.0,
+    # A bitwise-equivalent level-wise materializer remains available for
+    # memory-constrained deployments. Formal profiles keep the faster dense
+    # construction; measured EEG/FD latency and FLOPs did not improve lazily.
+    "ssaw_lazy_candidate_materialization": False,
+    # Small HAR/HHAR banks are faster as one vectorized allocation; large
+    # EEG/FD banks use level-wise materialization to reduce memory traffic.
+    "ssaw_lazy_candidate_min_bank_mb": 8.0,
+    # Do not scan target labels before adaptation merely to print a histogram.
+    # Labels remain available only to the post-hoc evaluator.
+    "record_target_label_histogram": False,
+    # Production retains only candidate decisions; evidence runners override
+    # logging mode and keep the complete feature/probability diagnostics.
+    "ssaw_production_decision_only": True,
+    "update_transaction_scope": "batch",
+    "record_optimizer_diagnostics": False,
+    "normalization_reference": "source",
+    "adapt_parameter_scope": "feature_extractor",
+    # Current-batch normalization is explicit and stateless: source running
+    # buffers are retained for guard evaluation but never updated on target.
+    "bn_statistics": "batch",
+    # The feature extractor is adapted while the classifier remains frozen.
+    "enable_ssaw": True,
+    "ssaw_sobol_seed": 1729,
+    # SSAW is an auxiliary objective; raw pseudo-label CE remains the
+    # optimization anchor for every confidence-admitted sample.
+    # Confidence admission is calibrated once from fixed source data.
+    "enable_confidence_gate": True,
+    "confidence_reference_samples": 4096,
+    # Unified sampled-spline search. Candidate directions are drawn once per
+    # deployment batch and reused across inner steps; there is no coefficient
+    # gradient refinement.
+    "spline_control_points": 10,
+    "spline_num_directions": 4,
+    "spline_log_strength": 0.20,
+    "spline_radius_levels": [1.0, 0.5, 0.25],
 }
 
-NUSTAR_DEFAULTS_EEG = dict(NUSTAR_DEFAULTS_HAR)
-NUSTAR_DEFAULTS_FD = dict(NUSTAR_DEFAULTS_HAR)
 
-def _apply_nustar_defaults(overrides, defaults):
-    for _, params in overrides.items():
-        for key, value in defaults.items():
-            params.setdefault(key, value)
-
-
-HAR_ACCUP_SCENARIO_OVERRIDES = {
-    backbone_scenario('CNN', 2, 11): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 18,
-        'cons_thresh': 0.01,
-        'fisher_alpha': 3000,
-        'freeze_bn_stats': False,
-        'grad_clip': 1.5,
-        'grad_clip_value': 0.25,
-        'include_warmup_support': False,
-        'learning_rate': 2.10852278491e-05,
-        'lr_decay': 0.4,
-        'max_fisher_updates': 128,
-        'momentum': 0.4,
-        'num_epochs': 8,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.00051256329344,
-        'proto_momentum': 0.1,
-        'sem_thresh': 0.9,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 16,
-        'stat_quantile': 0.5,
-        'stat_window': 256,
-        'step_size': 32,
-        'steps': 1,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'warmup_min': 1,
-        'weight_decay': 0.000663887199726086,
+# Dataset-level fallback values.  The paper runner overlays its registered
+# per-flow TTA profile while preserving these values for unspecified fields.
+_DATASET_DUSAFE = {
+    "EEG": {
+        "learning_rate": 2e-3,
+        "steps": 2,
+        "ssaw_auxiliary_weight": 0.003,
+        "confidence_keep_fraction": 1.0,
     },
-
-    backbone_scenario('CNN', 6, 23): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 5,
-        'cons_thresh': 0.01,
-        'd_margin': 0.1063060228835162,
-        'e_margin_scale': 0.4221450154673497,
-        'filter_K': 21,
-        'fisher_alpha': 1781.4145625320652,
-        'freeze_bn_stats': False,
-        'grad_clip': 1.3421471420873639,
-        'grad_clip_value': 0.1,
-        'include_warmup_support': True,
-        'lambda_eata': 2.4511773689160767,
-        'learning_rate': 3.5e-06,
-        'lr_decay': 0.1,
-        'max_fisher_updates': 64,
-        'memory_size': 2048,
-        'momentum': 0.6835535372453551,
-        'num_epochs': 15,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.00068,
-        'proto_momentum': 0.5,
-        'quantile': 0.2154065614507218,
-        'safety_keep_frac': 0.6008087313868886,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 40,
-        'steps': 1,
-        'tau': 8,
-        'temperature': 1.1194244008384406,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 64,
-        'weight_decay': 3.811117047127126e-05,
+    "HAR": {
+        # Raw updates and SSAW eligibility share confidence admission.
+        "learning_rate": 3.325e-4,
+        "steps": 2,
+        "ssaw_auxiliary_weight": 0.1,
+        "confidence_keep_fraction": 0.995,
     },
-
-    backbone_scenario('CNN', 7, 13): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 25,
-        'cons_thresh': 0.01,
-        'd_margin': 0.12397996662963483,
-        'e_margin_scale': 0.7940335168215802,
-        'filter_K': 29,
-        'fisher_alpha': 847.4435646300739,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.35070080187694785,
-        'grad_clip_value': 0.1,
-        'include_warmup_support': True,
-        'lambda_eata': 0.8813665897661196,
-        'learning_rate': 9e-06,
-        'lr_decay': 0.2,
-        'max_fisher_updates': 32,
-        'memory_size': 2048,
-        'momentum': 0.3,
-        'num_epochs': 15,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.00011,
-        'proto_momentum': 0.5,
-        'quantile': 0.29465242281038007,
-        'safety_keep_frac': 0.6043035918777842,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 20,
-        'steps': 1,
-        'tau': 29,
-        'temperature': 0.7119531985421709,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 64,
-        'weight_decay': 0.00037599766990728935,
+    "FD": {
+        "learning_rate": 3e-6,
+        "steps": 2,
+        "ssaw_auxiliary_weight": 0.05,
+        # Source-only FD calibration (clean + fixed 50% signal-freeze panel)
+        # selected the highest candidate that preserved both F1 values within
+        # 0.2 percentage points while minimizing clean-correct false rejection:
+        # q=.95 vs the previous q=.90 baseline.
+        "confidence_keep_fraction": 0.95,
     },
-
-    backbone_scenario('CNN', 9, 18): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 6,
-        'cons_thresh': 0.01,
-        'd_margin': 0.10768812394015775,
-        'e_margin_scale': 0.6975918072171362,
-        'filter_K': 25,
-        'fisher_alpha': 1914.323311057331,
-        'freeze_bn_stats': False,
-        'grad_clip': 0.4215161532217107,
-        'grad_clip_value': 0.25,
-        'include_warmup_support': True,
-        'lambda_eata': 2.365888932876843,
-        'learning_rate': 7e-06,
-        'lr_decay': 0.2,
-        'max_fisher_updates': 128,
-        'memory_size': 2048,
-        'momentum': 0.8499147261518536,
-        'num_epochs': 15,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.0007,
-        'proto_momentum': 1.1,
-        'quantile': 0.5011721510087463,
-        'safety_keep_frac': 0.8424651365450455,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 64,
-        'stat_quantile': 0.4,
-        'stat_window': 256,
-        'step_size': 42,
-        'steps': 4,
-        'tau': 15,
-        'temperature': 2.014667767023302,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 1,
-        'weight_decay': 0.0009919512457586324,
-    },
-
-    backbone_scenario('CNN', 12, 16): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 56,
-        'adv_sigma': 0.5,
-        'batch_size': 17,
-        'cons_thresh': 0.01,
-        'fisher_alpha': 3233.768103119852,
-        'freeze_bn_stats': False,
-        'grad_clip': 0.3,
-        'grad_clip_value': 0.1,
-        'include_warmup_support': True,
-        'learning_rate': 2.18737822497e-06,
-        'lr_decay': 0.2,
-        'max_fisher_updates': 128,
-        'momentum': 0.3,
-        'num_epochs': 12,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.00081,
-        'proto_momentum': 0.1,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 10,
-        'steps': 1,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'warmup_min': 1,
-        'weight_decay': 0.0005745937675896207,
+    "HHAR": {
+        # These are conservative protocol-safe starting values for the new
+        # HHAR integration.  They are not tuned or selected using HHAR target
+        # labels. It uses the same sampled spline mechanism as every dataset.
+        "learning_rate": 1e-4,
+        "steps": 1,
+        "ssaw_auxiliary_weight": 1.0,
+        "confidence_keep_fraction": 1.0,
     },
 }
 
-_apply_nustar_defaults(HAR_ACCUP_SCENARIO_OVERRIDES, NUSTAR_DEFAULTS_HAR)
 
-FD_ACCUP_SCENARIO_OVERRIDES = {
-    backbone_scenario('CNN', 0, 1): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 20,
-        'adv_sigma': 0.15,
-        'batch_size': 100,
-        'cons_thresh': 0.31,
-        'd_margin': 0.12996179366476152,
-        'e_margin_scale': 0.31709975589186795,
-        'filter_K': 29,
-        'fisher_alpha': 1013.6092522457566,
-        'freeze_bn_stats': True,
-        'grad_clip': 1.463814992817392,
-        'grad_clip_value': 0.25,
-        'include_warmup_support': True,
-        'lambda_eata': 1.2497083253681203,
-        'learning_rate': 6e-05,
-        'lr_decay': 0.5,
-        'max_fisher_updates': 32,
-        'memory_size': 2048,
-        'momentum': 0.8078763519687022,
-        'num_epochs': 33,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.000915085669888,
-        'proto_momentum': 1.0,
-        'quantile': 0.2318704925421785,
-        'safety_keep_frac': 0.8295262377474353,
-        'sem_thresh': 0.2,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 22,
-        'steps': 2,
-        'tau': 21,
-        'temperature': 0.6747429936239713,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 1,
-        'weight_decay': 0.0008793200616704788,
+# Supervised source training is independent of the deployment stream.  These
+# dataset-level recipes are fixed before adaptation; every compared TTA method
+# must start from the same source-domain checkpoint for a paired run.
+_SOURCE_TRAIN_PARAMS = {
+    "EEG": {
+        "num_epochs": 320,
+        "batch_size": 96,
+        "weight_decay": 1e-7,
     },
-
-    backbone_scenario('CNN', 1, 0): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 118,
-        'cons_thresh': 0.1,
-        'fisher_alpha': 2000,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.8,
-        'grad_clip_value': 0.5,
-        'include_warmup_support': False,
-        'learning_rate': 3e-07,
-        'lr_decay': 0.4,
-        'max_fisher_updates': 512,
-        'momentum': 0.3,
-        'num_epochs': 54,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.03,
-        'proto_momentum': 0.1,
-        'sem_thresh': 0.15,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.8,
-        'stat_window': 512,
-        'step_size': 29,
-        'steps': 4,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'warmup_min': 1,
-        'weight_decay': 1e-05,
+    "HAR": {
+        "num_epochs": 100,
+        "batch_size": 16,
+        "weight_decay": 1e-4,
     },
-
-    backbone_scenario('CNN', 1, 2): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 138,
-        'cons_thresh': 0.01,
-        'fisher_alpha': 2000,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.3,
-        'grad_clip_value': None,
-        'include_warmup_support': True,
-        'learning_rate': 0.00025,
-        'lr_decay': 0.3,
-        'max_fisher_updates': 64,
-        'momentum': 0.3,
-        'num_epochs': 25,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.0029,
-        'proto_momentum': 0.5,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.9,
-        'stat_window': 512,
-        'step_size': 28,
-        'steps': 3,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'warmup_min': 1,
-        'weight_decay': 0.00015905963734717395,
+    "FD": {
+        "num_epochs": 60,
+        "batch_size": 64,
+        "weight_decay": 1e-4,
     },
-
-    backbone_scenario('CNN', 2, 3): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 128,
-        'cons_thresh': 0.2,
-        'd_margin': 0.05951942705585153,
-        'e_margin_scale': 0.5662604605835384,
-        'filter_K': 15,
-        'fisher_alpha': 1763.6026356847815,
-        'freeze_bn_stats': False,
-        'grad_clip': 1.3669676592828344,
-        'grad_clip_value': 1.0,
-        'include_warmup_support': True,
-        'lambda_eata': 1.226351394174099,
-        'learning_rate': 9e-07,
-        'lr_decay': 0.2629447502891978,
-        'max_fisher_updates': 128,
-        'memory_size': 2048,
-        'momentum': 0.2,
-        'num_epochs': 25,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.000999013572203,
-        'proto_momentum': 0.1,
-        'quantile': 0.6273334736122688,
-        'safety_keep_frac': 0.41140938359073054,
-        'sem_thresh': 0.3,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.8,
-        'stat_window': 512,
-        'step_size': 25,
-        'steps': 1,
-        'tau': 15,
-        'temperature': 2.6209229097834283,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 1,
-        'weight_decay': 0.0009204145717746104,
-    },
-
-    backbone_scenario('CNN', 3, 1): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 88,
-        'cons_thresh': 0.01,
-        'fisher_alpha': 1000,
-        'freeze_bn_stats': False,
-        'grad_clip': 0.4,
-        'grad_clip_value': 0.8,
-        'include_warmup_support': False,
-        'learning_rate': 1e-07,
-        'lr_decay': 0.4,
-        'max_fisher_updates': 256,
-        'momentum': 0.4,
-        'num_epochs': 25,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.001,
-        'proto_momentum': 0.1,
-        'sem_thresh': 0.15,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 30,
-        'steps': 1,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'warmup_min': 1,
-        'weight_decay': 3e-05,
+    "HHAR": {
+        "num_epochs": 100,
+        "batch_size": 16,
+        "weight_decay": 1e-4,
     },
 }
 
-_apply_nustar_defaults(FD_ACCUP_SCENARIO_OVERRIDES, NUSTAR_DEFAULTS_FD)
 
-EEG_ACCUP_SCENARIO_OVERRIDES = {
-    backbone_scenario('CNN', 0, 11): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 16,
-        'adv_sigma': 0.15,
-        'batch_size': 96,
-        'cons_thresh': 0.21,
-        'fisher_alpha': 2000,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.8,
-        'grad_clip_value': None,
-        'include_warmup_support': True,
-        'learning_rate': 2.9e-05,
-        'lr_decay': 0.5,
-        'max_fisher_updates': 256,
-        'momentum': 0.6,
-        'num_epochs': 30,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.00051,
-        'proto_momentum': 0.5,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 10,
-        'steps': 1,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'weight_decay': 5e-05,
+# Deployment defaults may be overridden per registered flow without changing
+# the corresponding fixed source checkpoint.
+_TARGET_RUNTIME_PARAMS = {
+    "EEG": {
+        "batch_size": 192,
+        "weight_decay": 0.0,
+        "grad_clip": 0.03,
+        "grad_clip_value": None,
     },
-
-    backbone_scenario('CNN', 7, 18): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 129,
-        'cons_thresh': 0.01,
-        'd_margin': 0.043616703427593266,
-        'e_margin_scale': 0.24403745324519013,
-        'filter_K': 11,
-        'fisher_alpha': 1758.258253433386,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.8166807331896206,
-        'grad_clip_value': 0.25,
-        'include_warmup_support': True,
-        'lambda_eata': 1.3450020176654984,
-        'learning_rate': 5e-06,
-        'lr_decay': 0.6,
-        'max_fisher_updates': 512,
-        'memory_size': 2048,
-        'momentum': 0.7,
-        'num_epochs': 30,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.0006,
-        'proto_momentum': 0.5,
-        'quantile': 0.5083185913463465,
-        'safety_keep_frac': 0.6447116594952267,
-        'sem_thresh': 0.15,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.3,
-        'stat_window': 512,
-        'step_size': 14,
-        'steps': 1,
-        'tau': 7,
-        'temperature': 1.961773414541352,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 64,
-        'weight_decay': 4.157333141396952e-05,
+    "HAR": {
+        "batch_size": 48,
+        "weight_decay": 1e-6,
+        "grad_clip": 0.01,
+        "grad_clip_value": None,
     },
-
-    backbone_scenario('CNN', 9, 14): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 32,
-        'adv_sigma': 0.3,
-        'batch_size': 226,
-        'cons_thresh': 0.01,
-        'fisher_alpha': 900,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.8,
-        'grad_clip_value': None,
-        'include_warmup_support': True,
-        'learning_rate': 4e-06,
-        'lr_decay': 0.5,
-        'max_fisher_updates': 256,
-        'momentum': 0.4,
-        'num_epochs': 25,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.0023,
-        'proto_momentum': 0.1,
-        'sem_thresh': 0.15,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 30,
-        'steps': 2,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'weight_decay': 4.395625457432446e-05,
+    "FD": {
+        "batch_size": 192,
+        "weight_decay": 1e-4,
+        "grad_clip": 0.03,
+        "grad_clip_value": None,
     },
-
-    backbone_scenario('CNN', 12, 5): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 24,
-        'adv_sigma': 0.15,
-        'batch_size': 90,
-        'cons_thresh': 0.2,
-        'd_margin': 0.007221103490528474,
-        'e_margin_scale': 0.4167409829526597,
-        'filter_K': 25,
-        'fisher_alpha': 1129.1862650411952,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.8792368270998014,
-        'grad_clip_value': 0.25,
-        'include_warmup_support': True,
-        'lambda_eata': 2.638868543136085,
-        'learning_rate': 0.00021,
-        'lr_decay': 0.5,
-        'max_fisher_updates': 256,
-        'memory_size': 2048,
-        'momentum': 0.9,
-        'num_epochs': 34,
-        'online_fisher': True,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.00048,
-        'proto_momentum': 0.3,
-        'quantile': 0.4543364870913097,
-        'safety_keep_frac': 0.8706397773457994,
-        'sem_thresh': 0.25,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.7,
-        'stat_window': 512,
-        'step_size': 25,
-        'steps': 1,
-        'tau': 23,
-        'temperature': 0.8923610274083212,
-        'train_backbone_modules': None,
-        'train_classifier': True,
-        'train_full_backbone': True,
-        'use_eata_reg': True,
-        'use_eata_select': True,
-        'use_quantile': True,
-        'warmup_min': 64,
-        'weight_decay': 6.5e-05,
-    },
-
-    backbone_scenario('CNN', 16, 1): {
-        'adv_ctrl_points': 10,
-        'adv_num_candidates': 8,
-        'adv_sigma': 0.2,
-        'batch_size': 133,
-        'cons_thresh': 0.2,
-        'fisher_alpha': 2000,
-        'freeze_bn_stats': True,
-        'grad_clip': 0.3,
-        'grad_clip_value': 0.1,
-        'include_warmup_support': False,
-        'learning_rate': 0.00021,
-        'lr_decay': 0.3,
-        'max_fisher_updates': 256,
-        'momentum': 0.8079469220282296,
-        'num_epochs': 30,
-        'optim_method': 'adam',
-        'pre_learning_rate': 0.002,
-        'proto_momentum': 0.1,
-        'sem_thresh': 0.05,
-        'stat_min_entropy': 0.0,
-        'stat_min_history': 32,
-        'stat_quantile': 0.4,
-        'stat_window': 256,
-        'step_size': 20,
-        'steps': 2,
-        'train_backbone_modules': ['conv_block1', 'conv_block2'],
-        'train_classifier': True,
-        'train_full_backbone': False,
-        'weight_decay': 2.0322884602495502e-05,
+    "HHAR": {
+        "batch_size": 48,
+        "weight_decay": 1e-6,
+        "grad_clip": 0.01,
+        "grad_clip_value": None,
     },
 }
 
-_apply_nustar_defaults(EEG_ACCUP_SCENARIO_OVERRIDES, NUSTAR_DEFAULTS_EEG)
 
-def get_hparams_class(dataset_name):  # 根据给定数据集名称字符串返回对应的数据集配置类
-    if dataset_name not in globals():
-        raise NotImplementedError("Dataset not found: {}".format(dataset_name))
-    return globals()[dataset_name]
+_SOURCE_LEARNING_RATES = {
+    "EEG": 5e-4,
+    "HAR": 1e-4,
+    "FD": 1e-2,
+    "HHAR": 1e-4,
+}
 
-class FD():
+
+class _DatasetHParams:
+    dataset_name = None
+
     def __init__(self):
-        super(FD, self).__init__()
-        self.train_params = {
-            'num_epochs': 40,
-            'batch_size': 128,
-            'weight_decay': 1e-4,
-            'step_size': 30,
-            'lr_decay': 0.5,
-            'steps': 1,
-            'optim_method': 'adam',
-            'momentum': 0.9,
-            'grad_clip': 0.5,
-            'grad_clip_value': None
-        }
+        dataset_name = self.dataset_name
+        self.source_train_params = deepcopy(
+            _SOURCE_TRAIN_PARAMS[dataset_name]
+        )
+        self.train_params = deepcopy(_TARGET_RUNTIME_PARAMS[dataset_name])
         self.alg_hparams = {
-            'ACCUP': {
-                'pre_learning_rate': 3e-4,
-                'learning_rate': 1e-4,
-                'adv_sigma': 0.1,
-                'adv_ctrl_points': 10,
-                'adv_num_candidates': 16,
-                'sem_thresh': 0.5,
-                'cons_thresh': 0.5,
-                'stat_quantile': 0.7,
-                'stat_window': 512,
-                'stat_min_history': 32,
-                'stat_min_entropy': 0.0,
-                'proto_momentum': 0.9,
-
-                # Regularization
-                'fisher_alpha': 2000.0,
-                'max_fisher_updates': -1,
-                'freeze_bn_stats': False,
-
-                'scenario_overrides': dict(FD_ACCUP_SCENARIO_OVERRIDES),
-
-                'grad_clip': 0.5,
-                'grad_clip_value': None
+            "DuSafe": {
+                **deepcopy(_COMMON_DUSAFE),
+                **deepcopy(_DATASET_DUSAFE[dataset_name]),
             },
-            'EATA': {
-                'pre_learning_rate': 3e-4,
-                'learning_rate': 1e-4,
-                'e_margin': 0.43944491546724396,
-                'd_margin': 0.05,
-                'fisher_alpha': 2000.0,
-                'adapt_keywords': ('classifier', 'adapter'),
-                'grad_clip': 0.5,
-                'scenario_overrides': {}
+            "NoAdap": {
+                "pre_learning_rate": _SOURCE_LEARNING_RATES[dataset_name],
+                "normalization_reference": "source",
             },
-            'Tent': {
-                'pre_learning_rate': 3e-4,
-                'learning_rate': 2.5e-4,
-                'grad_clip': 0.5,
-                'grad_clip_value': None,
-                'episodic': False,
-                'scenario_overrides': {}
-            },
-            'SAR': {
-                'pre_learning_rate': 3e-4,
-                'learning_rate': 2.5e-4,
-                'sar_margin_e0': -1.0,
-                'sar_reset_constant_em': 0.2,
-                'sar_rho': 0.05,
-                'sar_adaptive': False,
-                'sar_base_optimizer': 'sgd',
-                'grad_clip': 0.5,
-                'grad_clip_value': None,
-                'episodic': False,
-                'scenario_overrides': {}
-            },
-            'NoAdap': {'pre_learning_rate': 5e-4}
-        }
-
-class EEG():
-    def __init__(self):
-        super(EEG, self).__init__()
-        self.train_params = {
-            'num_epochs': 40,
-            'batch_size': 96,        # ↑ 从 64 提到 96：更稳定的 BN/统计，CPU 也扛得住
-            'weight_decay': 5e-5,
-            'step_size': 20,         # ↓ 让预训练在第20轮衰减一次学习率
-            'lr_decay': 0.5,
-            'steps': 1,
-            'optim_method': 'adam',
-            'momentum': 0.9,
-            'grad_clip': 0.5,        # ↑ 统一为 0.5，避免双处设置相互打架
-            'grad_clip_value': None
-        }
-        self.alg_hparams = {
-            'ACCUP': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 3e-4,
-                'adv_sigma': 0.1,
-                'adv_ctrl_points': 10,
-                'adv_num_candidates': 16,
-                'sem_thresh': 0.5,
-                'cons_thresh': 0.5,
-                'stat_quantile': 0.7,
-                'stat_window': 512,
-                'stat_min_history': 32,
-                'stat_min_entropy': 0.0,
-                'proto_momentum': 0.9,
-
-                # Regularization
-                'fisher_alpha': 2000.0,
-                'max_fisher_updates': -1,
-                'freeze_bn_stats': False,
-
-                'scenario_overrides': dict(EEG_ACCUP_SCENARIO_OVERRIDES),
-
-                'grad_clip': 0.5,
-                'grad_clip_value': None
-            },
-            'EATA': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 3e-4,
-                'e_margin': 0.6437751649736402,
-                'd_margin': 0.05,
-                'fisher_alpha': 2000.0,
-                'adapt_keywords': ('classifier', 'adapter'),
-                'grad_clip': 0.5,
-                'scenario_overrides': {}
-            },
-            'Tent': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 2.5e-4,
-                'grad_clip': 0.5,
-                'grad_clip_value': None,
-                'episodic': False,
-                'scenario_overrides': {}
-            },
-            'SAR': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 2.5e-4,
-                'sar_margin_e0': -1.0,
-                'sar_reset_constant_em': 0.2,
-                'sar_rho': 0.05,
-                'sar_adaptive': False,
-                'sar_base_optimizer': 'sgd',
-                'grad_clip': 0.5,
-                'grad_clip_value': None,
-                'episodic': False,
-                'scenario_overrides': {}
-            },
-            'NoAdap': {'pre_learning_rate': 5e-4}
         }
 
 
-class HAR():
-    def __init__(self):
-        super(HAR, self).__init__()
-        self.train_params = {
-            'num_epochs': 15,  # 30 -> 16（避免源域过拟合，利于 TTA）
-            'batch_size': 16,
-            'weight_decay': 1e-4,
-            'step_size': 50,
-            'lr_decay': 0.5,
-            'steps': 1,
-            'optim_method': 'adam',
-            'momentum': 0.9,
-            'grad_clip': 0.1,
-            'grad_clip_value': None
-        }
-        # 关键：NuSTAR 的核心超参
-        self.alg_hparams = {
-            'ACCUP': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 3e-5,  # TTA 基础 lr；如果代码支持分组，BN 用 5e-5
-                'adv_sigma': 0.1,
-                'adv_ctrl_points': 10,
-                'adv_num_candidates': 16,
-                'sem_thresh': 0.5,
-                'cons_thresh': 0.5,
-                'stat_quantile': 0.7,
-                'stat_window': 512,
-                'stat_min_history': 32,
-                'stat_min_entropy': 0.0,
-                'proto_momentum': 0.9,
+class EEG(_DatasetHParams):
+    dataset_name = "EEG"
 
-                # Regularization
-                'fisher_alpha': 2000.0,
-                'max_fisher_updates': -1,
-                'freeze_bn_stats': False,
 
-                'scenario_overrides': dict(HAR_ACCUP_SCENARIO_OVERRIDES),
+class HAR(_DatasetHParams):
+    dataset_name = "HAR"
 
-                'grad_clip': 1.0,
-                'grad_clip_value': 0.5
-            },
-            'EATA': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 3e-5,
-                'e_margin': 0.716703787691222,
-                'd_margin': 0.05,
-                'fisher_alpha': 2000.0,
-                'adapt_keywords': ('classifier', 'adapter'),
-                'grad_clip': 1.0,
-                'grad_clip_value': 0.5,
-                'scenario_overrides': {}
-            },
-            'Tent': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 2.5e-4,
-                'grad_clip': 1.0,
-                'grad_clip_value': 0.5,
-                'episodic': False,
-                'scenario_overrides': {}
-            },
-            'SAR': {
-                'pre_learning_rate': 5e-4,
-                'learning_rate': 2.5e-4,
-                'sar_margin_e0': -1.0,
-                'sar_reset_constant_em': 0.2,
-                'sar_rho': 0.05,
-                'sar_adaptive': False,
-                'sar_base_optimizer': 'sgd',
-                'grad_clip': 1.0,
-                'grad_clip_value': 0.5,
-                'episodic': False,
-                'scenario_overrides': {}
-            },
-            'NoAdap': {'pre_learning_rate': 1e-3}
-        }
+
+class FD(_DatasetHParams):
+    dataset_name = "FD"
+
+
+class HHAR(_DatasetHParams):
+    dataset_name = "HHAR"

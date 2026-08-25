@@ -2,6 +2,11 @@
 data/
 Dataset/
 results/
+tmp/
+exports/
+artifacts/
+.pretrain_cache/
+pretrain_cache/
 .venv1
 .venv
 .venv311/
@@ -14,6 +19,12 @@ results/
 *.tar
 *.gz
 *.7z
+*.sqlite3
+*.db-journal
+
+# Shallow official baseline clones are retained locally for audit/reproduction;
+# do not vendor their source trees or nested Git metadata into this repository.
+third_party/official_baselines/*/
 
 # OS junk
 .DS_Store
@@ -22,6 +33,8 @@ Thumbs.db
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
 
 # IDE
 .idea/

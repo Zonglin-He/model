@@ -1,0 +1,16 @@
+{
+  "active_batch_rule": {
+    "metric": "ssaw_admitted_participation_rate",
+    "minimum": 0.25
+  },
+  "future_horizon_batches": 1,
+  "protocol": "paper_representative_flow_selection_v1",
+  "selected_flows": {
+    "EEG": "9->14",
+    "HAR": "9->18",
+    "HHAR": "4->5"
+  },
+  "selection_uses_f1": false,
+  "selection_uses_target_labels": false,
+  "selection_rule": "second_highest source-seed-averaged SSAW signal density among the five formal flows"
+}

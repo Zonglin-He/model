@@ -1,11 +1,46 @@
-from pre_train_model.pre_train_model import PreTrainModel
-from algorithms.accup import ACCUP
-from algorithms.eata_accup import EATA
-from algorithms.tent_tta import Tent
-from algorithms.sar_tta import SAR
+"""Production TTA method registry.
 
-def get_algorithm_class(algorithm_name): # 根据给定的算法名称字符串返回对应的算法类
-    """Return the algorithm class with the given name."""
-    if algorithm_name not in globals():
-        raise NotImplementedError("Algorithm not found: {}".format(algorithm_name))
-    return globals()[algorithm_name]
+The public ``DuSafe`` name remains the stable registry entry.  Dataset-level
+profiles may select a reviewed DuSafe implementation variant without exposing
+experiment-only class names through the command line.
+"""
+
+_DUSAFE_VARIANT_ALIASES = {
+    None: "spline_residual",
+    "": "spline_residual",
+    "spline_residual": "spline_residual",
+    "confidence_raw": "confidence_raw",
+    # Archived experiment manifests use the former screen names. They resolve
+    # to the reviewed production implementations but are not emitted by any
+    # current configuration.
+    "fixed_kl_b4": "spline_residual",
+    "confidence_raw_n2": "confidence_raw",
+}
+
+
+def get_algorithm_class(algorithm_name, *, variant=None):
+    if algorithm_name != "DuSafe":
+        raise NotImplementedError(
+            f"Unknown adaptation method: {algorithm_name}"
+        )
+    try:
+        resolved = _DUSAFE_VARIANT_ALIASES[
+            None if variant is None else str(variant).strip().lower()
+        ]
+    except KeyError as exc:
+        raise NotImplementedError(
+            f"Unknown DuSafe implementation variant: {variant}"
+        ) from exc
+    from algorithms.dusafe_spline_hard_view import (
+        ConfidenceAdmittedSplineResidualKL,
+        ConfidenceRawOnly,
+    )
+
+    if resolved == "spline_residual":
+        return ConfidenceAdmittedSplineResidualKL
+    if resolved == "confidence_raw":
+        return ConfidenceRawOnly
+    raise AssertionError(f"Unhandled DuSafe variant: {resolved}")
+
+
+__all__ = ["get_algorithm_class"]

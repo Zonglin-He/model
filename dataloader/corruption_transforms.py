@@ -98,6 +98,50 @@ def sensor_disconnect(x: torch.Tensor, severity: str):
     return out
 
 
+def blackout(x: torch.Tensor, severity: str):
+    _validate_input(x, severity)
+    ratios = {"mild": 0.05, "moderate": 0.15, "severe": 0.30}
+    out = x.clone()
+    length = max(1, int(round(out.size(-1) * ratios[severity])))
+    max_start = max(1, out.size(-1) - length + 1)
+    for batch_idx in range(out.size(0)):
+        start = int(torch.randint(max_start, (1,), device=out.device).item())
+        out[batch_idx, :, start : start + length] = 0.0
+    return out
+
+
+def attenuation(x: torch.Tensor, severity: str):
+    _validate_input(x, severity)
+    factor = {"mild": 0.8, "moderate": 0.5, "severe": 0.2}[severity]
+    return x * factor
+
+
+def packet_loss(x: torch.Tensor, severity: str):
+    _validate_input(x, severity)
+    settings = {
+        "mild": (0.05, 4),
+        "moderate": (0.15, 8),
+        "severe": (0.30, 16),
+    }
+    ratio, packets = settings[severity]
+    out = x.clone()
+    packet_len = max(1, int(round(out.size(-1) * ratio / packets)))
+    max_start = max(1, out.size(-1) - packet_len + 1)
+    for batch_idx in range(out.size(0)):
+        starts = torch.randint(max_start, (packets,), device=out.device)
+        for start in starts.tolist():
+            out[batch_idx, :, start : start + packet_len] = 0.0
+    return out
+
+
+def saturation(x: torch.Tensor, severity: str):
+    _validate_input(x, severity)
+    multiplier = {"mild": 2.5, "moderate": 1.5, "severe": 0.75}[severity]
+    center = x.mean(dim=-1, keepdim=True)
+    scale = x.std(dim=-1, keepdim=True).clamp_min(1e-6) * multiplier
+    return torch.maximum(torch.minimum(x, center + scale), center - scale)
+
+
 CORRUPTION_REGISTRY = {
     "signal_freeze": signal_freeze,
     "channel_dropout": channel_dropout,
@@ -105,4 +149,8 @@ CORRUPTION_REGISTRY = {
     "piecewise_scaling": piecewise_scaling,
     "burst_noise": burst_noise,
     "sensor_disconnect": sensor_disconnect,
+    "blackout": blackout,
+    "attenuation": attenuation,
+    "packet_loss": packet_loss,
+    "saturation": saturation,
 }

@@ -1,0 +1,76 @@
+{
+  "protocol": "dusafe_augmentation_controls_v1_matched_search_and_update",
+  "purpose": "Separate augmentation family, hard selection, and extra compute.",
+  "screening": {
+    "status": "design_screen_only",
+    "flows": ["HAR:12->16", "HHAR:1->6"],
+    "source_seeds": [1],
+    "stream_seed": 42,
+    "target_labels_used_for_selection": true,
+    "claim_scope": "not_formal_evidence"
+  },
+  "formal": {
+    "datasets": ["HAR", "HHAR"],
+    "flows_per_dataset": 5,
+    "source_seeds": [0, 1, 2],
+    "stream_seed": 42,
+    "expected_cells": 180,
+    "target_labels_used_for_online_decision": false,
+    "target_labels_used_for_final_metrics": true,
+    "selection_rule": "freeze the full control panel before formal execution"
+  },
+  "variants": [
+    "confidence_only",
+    "random_eligible_spline",
+    "hard_gaussian_jitter",
+    "hard_scaling",
+    "hard_time_warp",
+    "hard_ssaw"
+  ],
+  "fairness_constraints": {
+    "same_source_checkpoint_within_unit": true,
+    "same_confidence_admission": true,
+    "same_optimizer_and_trainable_parameters": true,
+    "same_batch_size_learning_rate_steps_and_auxiliary_weight": true,
+    "one_gathered_auxiliary_view_per_admitted_sample": true,
+    "auxiliary_denominator": "all confidence-admitted anchors",
+    "hard_search_layout": {
+      "directions": 4,
+      "signs": 2,
+      "radii": [1.0, 0.5, 0.25],
+      "theoretical_candidates": 24
+    },
+    "dense_search_for_compute_matching": true,
+    "ssaw_exact_backtracking_evaluation": false,
+    "dusafe_logging_mode": "evidence",
+    "candidate_hash_logging": false
+  },
+  "strength_calibration": {
+    "data": "labeled held-out source only",
+    "target_labels_used": false,
+    "rule": "select the largest pre-registered strength whose source label-preservation lower 95% bound is at least 0.995",
+    "separate_strength_per_augmentation_family": true,
+    "target_flow_specific_strength_forbidden": true,
+    "default_smoke_values_only": {
+      "gaussian_jitter": 0.05,
+      "scaling": 0.2,
+      "time_warp": 0.05,
+      "ssaw": 0.2
+    }
+  },
+  "primary_contrasts": {
+    "view_exposure": "random_eligible_spline - confidence_only",
+    "hard_selection": "hard_ssaw - random_eligible_spline",
+    "geometry_vs_jitter": "hard_ssaw - hard_gaussian_jitter",
+    "geometry_vs_scaling": "hard_ssaw - hard_scaling",
+    "geometry_vs_time_warp": "hard_ssaw - hard_time_warp"
+  },
+  "primary_metric": "online stream Macro-F1",
+  "secondary_metrics": [
+    "selected-view coverage",
+    "source label-preservation rate",
+    "candidate forwards",
+    "batch latency",
+    "peak VRAM"
+  ]
+}
