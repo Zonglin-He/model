@@ -1,8 +1,9 @@
 # Dataset archive
 
 Datasets and checkpoints are intentionally excluded from Git history. The
-release asset `DuSafe_processed_datasets_20260825.zip` contains only the
-processed tensors needed by the loaders:
+[dataset release](https://github.com/Zonglin-He/model/releases/tag/datasets-20260825)
+asset `DuSafe_processed_datasets_20260825.zip` contains only the processed
+tensors needed by the loaders:
 
 ```text
 data/Dataset/
@@ -13,18 +14,25 @@ data/Dataset/
 ```
 
 The archive excludes raw HHAR CSV files, duplicate extraction directories,
-source checkpoints, results, caches, and model outputs. Extract it at the
-repository root so that `data/Dataset` exists.
-
-Verify the downloaded archive before extraction:
+source checkpoints, results, caches, and model outputs. It has a protective
+top-level directory. From the repository root, download, verify, and install
+it with:
 
 ```powershell
-Get-FileHash .\DuSafe_processed_datasets_20260825.zip -Algorithm SHA256
+$url = "https://github.com/Zonglin-He/model/releases/download/datasets-20260825/DuSafe_processed_datasets_20260825.zip"
+curl.exe -L -C - -o DuSafe_processed_datasets_20260825.zip $url
+(Get-FileHash .\DuSafe_processed_datasets_20260825.zip -Algorithm SHA256).Hash
+Expand-Archive .\DuSafe_processed_datasets_20260825.zip -DestinationPath .\_dataset_extract
+New-Item -ItemType Directory -Path .\data -Force
+Move-Item `
+  .\_dataset_extract\DuSafe_processed_datasets_20260825\data\Dataset `
+  .\data\Dataset
 ```
 
-Compare the value with the adjacent `.sha256` release asset. The archive also
-contains `DATASET_MANIFEST.csv`, with a SHA256 and byte size for every payload
-file.
+The expected archive SHA256 is
+`086719267ec2d2cfa0cdaf542a59844c383eab751a8dcd663d6bd8493394a493`.
+The archive also contains `DATASET_MANIFEST.csv`, with a SHA256 and byte size
+for every payload file.
 
 ## Sources and licenses
 
